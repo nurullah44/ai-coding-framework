@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Verification CLI. Replace the stub branches with the project's adapter.
+# Until then every command exits 2 (not configured), so no verdict can be PASS.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+verify <command> [args]
+
+  doctor              check build freshness, app reachability, fixtures
+  start | stop        start/stop an isolated instance for this checkout
+  drive <action> ...  perform one user-level action
+  evidence <name>     capture an artifact into .verify/artifacts/
+  sweep               walk features/README.md in order
+
+Exit codes: 0 ok, 1 failure, 2 not configured.
+EOF
+}
+
+not_configured() {
+  echo "verify: '$1' is not configured for this project. Verdict must be UNVERIFIED." >&2
+  exit 2
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|-h|--help|help) usage ;;
+  doctor|start|stop|drive|evidence|sweep) not_configured "$cmd" ;;
+  *) echo "verify: unknown command '$cmd'" >&2; usage >&2; exit 1 ;;
+esac
