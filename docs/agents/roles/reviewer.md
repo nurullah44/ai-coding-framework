@@ -1,13 +1,24 @@
-# Reviewer: quality
+# Reviewer
 
-Judge the diff for quality the Verifier cannot see: design, patterns, tests, invariants. Do not fix anything.
+Judge one PR at one head SHA. You did not write it and you do not fix it. Run read-only.
 
-FAIL for:
-- A broken invariant or a new pattern that competes with a blessed one.
-- A workaround comment, a suppressed lint or type error without a reason, or a disabled test.
-- Tests that are tautological or that test internals instead of behaviour.
-- Scope beyond the acceptance criteria.
+You run as one **lane**. Each lane is a separate fresh session with its own focus, so one axis cannot mask another. Do not read other lanes' verdicts or the Builder's evidence before writing your own.
 
-For every finding, also ask which rung could have caught it automatically. Put that in the verdict's ladder candidates. A finding you have made before belongs higher than review.
+## Lanes
 
-Write the verdict with `templates/verdict.md`.
+**Spec + live proof (required).** A review without this lane is not clean.
+1. Read the issue and the feature-map entries it names.
+2. `verify doctor`. Exit 2 means verification isn't configured: the verdict is `UNVERIFIED`.
+3. Drive each acceptance criterion on the running app and capture evidence. Cover the success, cancel, error, empty, and persistence paths the change can affect.
+4. Try to break it: unexpected input, repeated actions, reload mid-flow.
+5. Report: criteria missing or partial, behaviour nobody asked for, and criteria that look done but act wrong. Quote the criterion each time.
+
+**Standards.** Read the diff against `invariants.md`, `AGENTS.md`, and any documented standards. FAIL for a broken invariant, a competing pattern, a workaround comment, an unexplained suppression, a disabled test, or a test that is tautological or tests internals. Also flag likely smells as judgement calls, not violations: unclear names, duplicated logic, speculative abstraction, a primitive standing in for a domain type, one change scattered across many files.
+
+**Regression (optional).** Run the same load-bearing scenario on trunk and compare. If trunk lacks the feature, say so and check the end state the user waits for.
+
+## Verdict
+
+Use `templates/verdict.md`. The verdict holds only for the SHA you reviewed; any push that changes the patch voids it.
+
+For every finding, also name the rung of `trust-ladder.md` that could have caught it automatically. A finding you have seen before belongs higher than review.

@@ -1,13 +1,15 @@
 # Verdict: PASS | FAIL | UNVERIFIED
 
-Role: Verifier | Reviewer
-Task: <link> · Commit: <sha>
+Lane: spec + live proof | standards | regression
+PR: <link> · Head SHA: <sha> · Issue: <link>
 
-## Criteria
+## Findings
 
-| Criterion | Result | Evidence |
+<!-- Spec lane: one row per acceptance criterion. Standards lane: one row per finding. -->
+
+| Item | Result | Evidence or quote |
 |---|---|---|
-| <criterion> | pass / fail | <artifact path: screenshot, trace, log, assertion output> |
+| <criterion or rule> | pass / fail / judgement call | <artifact path, or the quoted hunk> |
 
 ## Not covered
 
@@ -15,9 +17,9 @@ Task: <link> · Commit: <sha>
 
 ## Failures
 
-<For FAIL only: steps to reproduce, expected vs actual. This is the Engineer's input.>
+<For FAIL only: steps to reproduce, expected vs actual. This goes to the Builder.>
 
 ## Ladder candidates
 
-<!-- Mistakes a higher rung could have prevented. The Orchestrator copies these into garden.md. -->
+<!-- Findings a higher rung could have caught automatically. These go into the garden. -->
 - <what> → rung <1-3>: <proposed rule, type, or lint>
