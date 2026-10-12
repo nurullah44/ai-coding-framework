@@ -16,7 +16,7 @@ Work on two tracks at once:
    - every required lane is PASS for that SHA,
    - the branch is rebased on current trunk and CI is green on that head,
    - the autonomy level allows it and no one-way door is touched.
-   Otherwise label `blocked-human` with a one-line ask.
+   If CI is red or the branch needs a rebase, send it back to the Builder. If the autonomy level or a one-way door is the only blocker, label `blocked-human` with a one-line ask.
 6. **Watch for stuck work.** Progress means side effects: commits, pushes, PR comments, check results. A session that passes its expected runtime with none is stuck; stop it and start a fresh one from the issue.
 7. **Log ladder candidates** from every verdict in the garden.
 8. Repeat until the stop condition holds.

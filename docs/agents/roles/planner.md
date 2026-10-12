@@ -21,6 +21,7 @@ For issues from the outer loop (bug reports, alerts). You may stop the line; sto
 3. Outcome, as a label and one comment:
    - Reproduced and clear → write the task with `templates/task.md`, label `ready-for-agent`.
    - Missing information → `needs-info`, with specific questions.
+   - Could not reproduce → `needs-info`, with the steps you tried and the evidence.
    - Expected behaviour or already fixed → close with the evidence.
    - Needs a product or design call → `blocked-human`, with the one question.
 

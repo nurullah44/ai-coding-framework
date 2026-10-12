@@ -14,7 +14,7 @@ Fill these in per project. If a command is missing, say so. Do not invent one.
 
 ## Hard rules
 
-1. **Evidence, not claims.** "Done" means `check` is green and there is verification evidence that matches the task's acceptance criteria. If verification is not configured, write `UNVERIFIED`. Never write PASS.
+1. **Evidence, not claims.** "Done" means `check` is green and there is verification evidence that matches the task's acceptance criteria. If `verify` is not configured, the result is `UNVERIFIED`, which never counts as PASS.
 2. **Fix upward.** When you correct a mistake or work around one, log it in `docs/agents/garden.md` with the highest rung of the trust ladder that could prevent it. See `docs/agents/trust-ladder.md`.
 3. **No workaround comments.** Do not leave a comment explaining why the real problem was not solved. Fix it, or log it in the garden and say so in your report.
 4. **One blessed way.** Extend the existing pattern. If two patterns exist for the same thing, use the one named in `docs/agents/invariants.md`, or ask.

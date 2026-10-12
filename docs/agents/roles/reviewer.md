@@ -11,6 +11,8 @@ You run as one **lane**. Each lane is a separate fresh session with its own focu
 2. `verify doctor`. Exit 2 means verification isn't configured: the verdict is `UNVERIFIED`.
 3. Drive each acceptance criterion on the running app and capture evidence. Cover the success, cancel, error, empty, and persistence paths the change can affect.
 4. Try to break it: unexpected input, repeated actions, reload mid-flow.
+If the issue's verification plan says the change has no runtime behaviour, run the replacement proof it names instead of steps 2–4, and say so. Judge whether that claim is true; a change with runtime behaviour can't opt out. If the plan names no proof, the verdict is `UNVERIFIED`.
+
 5. Report: criteria missing or partial, behaviour nobody asked for, and criteria that look done but act wrong. Quote the criterion each time.
 
 **Standards.** Read the diff against `invariants.md`, `AGENTS.md`, and any documented standards. FAIL for a broken invariant, a competing pattern, a workaround comment, an unexplained suppression, a disabled test, or a test that is tautological or tests internals. Also flag likely smells as judgement calls, not violations: unclear names, duplicated logic, speculative abstraction, a primitive standing in for a domain type, one change scattered across many files.
