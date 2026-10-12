@@ -38,7 +38,7 @@ report ─Planner (triage)─────┘                                    
 
 - **Nobody grades their own homework.** The Builder never issues the verdict on its own PR and never merges on it.
 - **A verdict belongs to a SHA.** A push that changes the patch voids every verdict and starts a new round.
-- **Live proof is the floor.** No merge without a PASS from the spec + live proof lane. `UNVERIFIED` is not PASS.
+- **Live proof is the floor.** No merge without PASS from both required lanes: spec + live proof, and standards. `UNVERIFIED` is not PASS.
 - **One writer per branch.** Each Builder works in its own worktree.
 - **Three FAIL rounds** on one issue → `blocked-human`. The loop is not converging.
 - **Every verdict lists ladder candidates.** They go into the garden.
