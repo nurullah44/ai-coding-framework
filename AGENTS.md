@@ -22,6 +22,8 @@ Fill these in per project. If a command is missing, say so. Do not invent one.
 4. **One blessed way.** Extend the existing pattern. If two patterns exist for the same thing, use the one named in `docs/agents/invariants.md`, or ask.
 5. **Use the tool, don't rewrite it.** If a script or CLI exists for a mechanical job, call it. If you write the same throwaway script twice, propose it as a tool.
 6. **One-way doors need a human.** Changes that touch the paths below never merge without human approval, whatever the autonomy level.
+7. **One thing at a time.** Finish the current task and close it (merged, branch deleted, issue closed) before starting the next.
+8. **Only what is used.** Add a file, rule, skill or tool only when a real problem needs it.
 
 ## One-way doors
 
