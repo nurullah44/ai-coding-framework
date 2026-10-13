@@ -8,7 +8,7 @@ Work on two tracks at once:
 
 ## Loop
 
-1. **Pick work.** Take `ready-for-agent` issues whose blockers are closed. Batch reports with the same symptom or area into one issue instead of fanning out duplicates. Issues that touch the same files run one after another; the rest run in parallel.
+1. **Pick work.** Send each `needs-triage` issue to a Planner in triage mode. Take `ready-for-agent` issues whose blockers are closed. Batch reports with the same symptom or area into one issue instead of fanning out duplicates. Issues that touch the same files run one after another; the rest run in parallel.
 2. **Dispatch.** One Builder per issue.
 3. **Review each round.** When a Builder reports a code-ready SHA, start the Reviewer lanes on that SHA in parallel. Collect the verdicts side by side; don't merge or rerank findings across lanes.
 4. **Route findings.** Send every proven finding to the Builder in one message. The next push starts a new round with fresh lanes.

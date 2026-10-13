@@ -21,6 +21,10 @@ Every project implements these. The adapter behind them is stack-specific (brows
 
 Exit code 2 means verification is not configured. The verdict is then `UNVERIFIED`, never PASS.
 
+## No runtime behaviour
+
+If the task's verification plan says the change has no runtime behaviour (for example, docs only), run the proof it names instead of this CLI, and say so. Judge whether the claim is true: a change with runtime behaviour can't opt out. If the plan names no proof, or the proof could not run, the result is `UNVERIFIED`.
+
 ## Proof bar
 
 - Run `doctor` first. Evidence against a stale build is not evidence.
