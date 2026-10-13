@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Framework self-check. Fails when the repo or the template breaks its own rules."""
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEMPLATE = os.path.join(ROOT, "template")
+
+AGENTS_MAX_LINES = 50
+AGENTS_MAX_BYTES = 3200  # about 800 tokens; AGENTS.md loads in every session
+
+# Paths the docs name that a project creates later, so they need not exist here.
+CREATED_BY_PROJECT = {"CLAUDE.md", "GLOSSARY.md", "docs/adr/", ".verify/artifacts/"}
+
+# Historical logs quote paths as they were; they are not pointers.
+NOT_POINTERS = {os.path.join(ROOT, "docs", "garden.md")}
+
+REQUIRED_H2 = {
+    "template/docs/agents/templates/task.md": [
+        "Goal", "Acceptance criteria", "Verification plan", "Out of scope", "Constraints", "Blocked by",
+    ],
+    "template/docs/agents/templates/verdict.md": [
+        "Findings", "Not covered", "Failures", "Ladder candidates",
+    ],
+}
+FEATURE_DIR = "template/.agents/skills/verify/features"
+FEATURE_H2 = ["Sub-features", "How to get to it (user POV)", "Driving it with verify", "Gotchas"]
+
+VERIFY = "template/.agents/skills/verify/verify"
+VERIFY_COMMANDS = ["doctor", "start", "stop", "drive", "evidence", "sweep"]
+
+failures = []
+
+
+def fail(msg):
+    failures.append(msg)
+
+
+def rel(path):
+    return os.path.relpath(path, ROOT)
+
+
+def markdown_files():
+    for base, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for f in files:
+            if f.endswith(".md"):
+                yield os.path.join(base, f)
+
+
+def h2s(path):
+    with open(path) as fh:
+        return [line[3:].strip() for line in fh if line.startswith("## ")]
+
+
+def check_agents_budget():
+    for path in (os.path.join(ROOT, "AGENTS.md"), os.path.join(TEMPLATE, "AGENTS.md")):
+        with open(path, "rb") as fh:
+            data = fh.read()
+        lines = data.count(b"\n")
+        if lines > AGENTS_MAX_LINES or len(data) > AGENTS_MAX_BYTES:
+            fail(f"{rel(path)}: {lines} lines / {len(data)} bytes, budget is "
+                 f"{AGENTS_MAX_LINES} lines / {AGENTS_MAX_BYTES} bytes")
+
+
+def resolves(ref, md_path):
+    """A reference resolves if it exists relative to the file's directory or any ancestor."""
+    tree_root = TEMPLATE if md_path.startswith(TEMPLATE + os.sep) else ROOT
+    d = os.path.dirname(md_path)
+    while True:
+        if os.path.exists(os.path.join(d, ref)):
+            return True
+        if d == tree_root or d == ROOT:
+            return False
+        d = os.path.dirname(d)
+
+
+def path_refs(text):
+    for m in re.finditer(r"`([^`\s]+)`", text):
+        ref = m.group(1)
+        if "/" in ref or ref.endswith(".md"):
+            yield ref
+    for m in re.finditer(r"\]\(([^)\s]+)\)", text):
+        yield m.group(1)
+
+
+def check_paths():
+    for md in markdown_files():
+        if md in NOT_POINTERS:
+            continue
+        with open(md) as fh:
+            # HTML comments hold examples, not pointers.
+            text = re.sub(r"<!--.*?-->", "", fh.read(), flags=re.S)
+        for ref in path_refs(text):
+            target = ref.split("#")[0]
+            if (not target or "://" in ref or target.startswith(("/", "@", "-"))
+                    or any(c in target for c in "<>*") or target in CREATED_BY_PROJECT):
+                continue
+            if not resolves(target, md):
+                fail(f"{rel(md)}: path `{ref}` does not exist")
+
+
+def check_headings():
+    for path, wanted in REQUIRED_H2.items():
+        got = h2s(os.path.join(ROOT, path))
+        if got != wanted:
+            fail(f"{path}: H2s are {got}, expected {wanted}")
+    feature_dir = os.path.join(ROOT, FEATURE_DIR)
+    for f in sorted(os.listdir(feature_dir)):
+        if f.endswith(".md") and f != "README.md":
+            got = h2s(os.path.join(feature_dir, f))
+            if got != FEATURE_H2:
+                fail(f"{FEATURE_DIR}/{f}: H2s are {got}, expected {FEATURE_H2}")
+
+
+def check_verify_stub():
+    path = os.path.join(ROOT, VERIFY)
+    for cmd in VERIFY_COMMANDS:
+        code = subprocess.run([path, cmd], capture_output=True).returncode
+        if code != 2:
+            fail(f"{VERIFY} {cmd}: exit {code}, expected 2 (not configured)")
+
+
+def check_skills_link():
+    link = os.path.join(TEMPLATE, ".claude", "skills")
+    if not os.path.islink(link) or not os.path.isfile(os.path.join(link, "verify", "SKILL.md")):
+        fail("template/.claude/skills: must be a symlink that resolves to .agents/skills")
+
+
+def check_claude_md():
+    for base in (ROOT, TEMPLATE):
+        path = os.path.join(base, "CLAUDE.md")
+        if os.path.exists(path):
+            with open(path) as fh:
+                if fh.readline().strip() != "@AGENTS.md":
+                    fail(f"{rel(path)}: first line must be @AGENTS.md, or AGENTS.md stops loading")
+
+
+def check_hard_rules_match():
+    def titles(path):
+        with open(path) as fh:
+            return re.findall(r"^\d+\. \*\*(.+?)\*\*", fh.read(), flags=re.M)
+    root, tmpl = titles(os.path.join(ROOT, "AGENTS.md")), titles(os.path.join(TEMPLATE, "AGENTS.md"))
+    if root != tmpl:
+        fail(f"AGENTS.md hard rules {root} differ from template/AGENTS.md {tmpl}")
+
+
+CHECKS = [
+    check_agents_budget,
+    check_paths,
+    check_headings,
+    check_verify_stub,
+    check_skills_link,
+    check_claude_md,
+    check_hard_rules_match,
+]
+
+for check in CHECKS:
+    check()
+
+if failures:
+    for msg in failures:
+        print(f"FAIL {msg}")
+    sys.exit(1)
+print(f"check: {len(CHECKS)} checks passed")
