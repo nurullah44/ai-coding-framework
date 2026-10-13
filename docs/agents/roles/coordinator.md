@@ -13,7 +13,7 @@ Work on two tracks at once:
 3. **Review each round.** When a Builder reports a code-ready SHA, start the Reviewer lanes on that SHA in parallel. Collect the verdicts side by side; don't merge or rerank findings across lanes.
 4. **Route findings.** Send every proven finding to the Builder in one message. The next push starts a new round with fresh lanes.
 5. **Merge.** Merge only when all of these hold for the same head:
-   - every required lane is PASS for that SHA,
+   - both required lanes ran, and every lane that ran is PASS for that SHA,
    - the branch is rebased on current trunk and CI is green on that head,
    - the autonomy level allows it and no one-way door is touched.
    If CI is red or the branch needs a rebase, send it back to the Builder. If the autonomy level or a one-way door is the only blocker, label `blocked-human` with a one-line ask.
