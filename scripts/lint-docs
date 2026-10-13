@@ -13,7 +13,8 @@ AGENTS_MAX_TOKENS = 800  # AGENTS.md loads in every session
 BYTES_PER_TOKEN = 4  # deterministic estimate for English prose; no tokenizer dependency
 
 # Paths the docs name that a project creates later, so they need not exist here.
-CREATED_BY_PROJECT = {"CLAUDE.md", "GLOSSARY.md", "docs/adr/", ".verify/artifacts/"}
+CREATED_BY_PROJECT = {"CLAUDE.md", "GLOSSARY.md", "docs/adr/"}
+GENERATED = ".verify/"  # gitignored output of verify and run-role
 
 # Historical logs quote paths as they were; they are not pointers.
 NOT_POINTERS = {os.path.join(ROOT, "docs", "garden.md")}
@@ -81,7 +82,7 @@ def resolves(ref, md_path):
 
 def skip(target):
     return (not target or "://" in target or target.startswith(("/", "@", "-"))
-            or target in CREATED_BY_PROJECT)
+            or target in CREATED_BY_PROJECT or target.startswith(GENERATED))
 
 
 def fixed_part(target):
@@ -158,6 +159,18 @@ def check_hard_rules_match():
         fail(f"AGENTS.md hard rules {root} differ from template/AGENTS.md {tmpl}")
 
 
+def check_template_independent():
+    """The template must work without reference/: it may not point at it (#11)."""
+    for base, dirs, files in os.walk(TEMPLATE):
+        for f in files:
+            path = os.path.join(base, f)
+            if os.path.islink(path):
+                continue
+            with open(path, errors="ignore") as fh:
+                if re.search(r"(?<![\w-])reference/", fh.read()):
+                    fail(f"{rel(path)}: mentions reference/; the template must not depend on it")
+
+
 CHECKS = [
     check_agents_budget,
     check_paths,
@@ -166,6 +179,7 @@ CHECKS = [
     check_skills_link,
     check_claude_md,
     check_hard_rules_match,
+    check_template_independent,
 ]
 
 for check in CHECKS:

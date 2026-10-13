@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Start one framework role as a fresh, headless session in Claude Code, Codex or Pi.
+
+    run-role reviewer <pr> --lane spec|standards|regression [--harness ...]
+    run-role builder <issue> [--harness ...]
+    run-role planner|coordinator|gardener [<issue>] [--harness ...]
+
+Every run gets its own git worktree and a run directory under .verify/runs/.
+"""
+import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# Our defaults. A project that adopts this reference sets its own.
+DEFAULTS = {
+    "claude": {"model": "claude-opus-5-5", "effort": "high"},
+    "codex": {"model": "gpt-6.1-sol", "effort": "xhigh"},
+    "pi": {"model": "openai-codex/gpt-6.1-sol", "effort": "xhigh"},
+}
+
+ROLES = ["planner", "builder", "reviewer", "coordinator", "gardener"]
+LANES = {"spec": "spec + live proof", "standards": "standards", "regression": "regression"}
+
+# What each kind of run may do. "inspect" reads only; "drive" also runs commands
+# (to drive the app or run check) but must leave the checkout unchanged; "write" edits.
+PROFILES = {
+    "inspect": {
+        "claude": ["--allowedTools", "Read,Grep,Glob", "--disallowedTools", "Edit,Write,Bash,NotebookEdit"],
+        "codex": ["--sandbox", "read-only"],
+        "pi": ["--tools", "read,grep,find,ls"],
+    },
+    "drive": {
+        "claude": ["--allowedTools", "Read,Grep,Glob,Bash", "--disallowedTools", "Edit,Write,NotebookEdit"],
+        "codex": ["--sandbox", "workspace-write"],
+        "pi": ["--tools", "read,grep,find,ls,bash"],
+    },
+    "write": {
+        "claude": ["--allowedTools", "Read,Grep,Glob,Bash,Edit,Write"],
+        "codex": ["--sandbox", "workspace-write"],
+        "pi": ["--tools", "read,grep,find,ls,bash,edit,write"],
+    },
+}
+
+EXIT_CHECKOUT_MODIFIED = 3
+EXIT_TIMEOUT = 124
+
+
+def profile_for(role, lane):
+    if role == "reviewer":
+        return "inspect" if lane == "standards" else "drive"
+    return "write"
+
+
+def build_command(harness, profile, model, effort, prompt, run_dir):
+    """Return (argv, stdin). The prompt goes on stdin for Claude: its variadic tool flags swallow a positional prompt."""
+    flags = PROFILES[profile][harness]
+    if harness == "claude":
+        return ["claude", "-p", "--model", model, "--effort", effort, "--add-dir", run_dir, *flags], prompt
+    if harness == "codex":
+        return ["codex", "exec", "-m", model, "-c", f"model_reasoning_effort={effort}", *flags, prompt], None
+    return ["pi", "-p", "--no-session", "--model", model, "--thinking", effort, *flags, prompt], None
+
+
+def sh(*argv, cwd=None):
+    return subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def gh_json(*argv):
+    return json.loads(sh("gh", *argv))
+
+
+def roles_dir(root):
+    for candidate in ("docs/agents/roles", "template/docs/agents/roles"):
+        if os.path.isdir(os.path.join(root, candidate)):
+            return candidate
+    sys.exit("run-role: no roles directory (docs/agents/roles or template/docs/agents/roles)")
+
+
+def fetch(root, ref):
+    """Fetch a ref over HTTPS with gh's credentials, so it works without an SSH key."""
+    url = gh_json("repo", "view", "--json", "url")["url"] + ".git"
+    subprocess.run(["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                    "fetch", "-q", url, ref], cwd=root, check=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    return sh("git", "rev-parse", "FETCH_HEAD", cwd=root)
+
+
+def prepare_target(root, role, number, run_dir):
+    """Check out the target in a fresh worktree and write what the role may see. Return (worktree, sha, pointers)."""
+    worktree = os.path.join(run_dir, "checkout")
+    if role == "reviewer":
+        pr = gh_json("pr", "view", str(number), "--json", "headRefOid,baseRefName,closingIssuesReferences")
+        issues = [i["number"] for i in pr["closingIssuesReferences"]]
+        if not issues:
+            sys.exit(f"run-role: PR #{number} links no issue. The Reviewer judges against an issue, not the PR description.")
+        sha = fetch(root, f"pull/{number}/head")
+        if sha != pr["headRefOid"]:
+            sys.exit(f"run-role: fetched {sha}, but PR #{number} head is {pr['headRefOid']}")
+        base = fetch(root, pr["baseRefName"])
+        sh("git", "worktree", "add", "-q", "--detach", worktree, sha, cwd=root)
+        with open(os.path.join(run_dir, "pr.diff"), "w") as fh:
+            fh.write(sh("git", "diff", "-M", f"{base}...{sha}", cwd=root) + "\n")
+        for n in issues:
+            body = gh_json("issue", "view", str(n), "--json", "title,body")
+            with open(os.path.join(run_dir, f"issue-{n}.md"), "w") as fh:
+                fh.write(f"# {body['title']}\n\n{body['body']}\n")
+        pointers = (f"PR #{number} at head SHA {sha}, checked out here (detached).\n"
+                    f"Spec: issue {', '.join(f'#{n}' for n in issues)}, in {run_dir}/issue-*.md.\n"
+                    f"Diff against {pr['baseRefName']}: {run_dir}/pr.diff.")
+        return worktree, sha, pointers
+
+    base = fetch(root, "main")
+    if role == "builder":
+        sh("git", "worktree", "add", "-q", "-b", f"issue-{number}", worktree, base, cwd=root)
+    else:
+        sh("git", "worktree", "add", "-q", "--detach", worktree, base, cwd=root)
+    pointers = f"Checkout: a fresh worktree of main at {base}."
+    if number is not None:
+        pointers += f" Issue #{number}: read it with `gh issue view {number}`."
+    return worktree, base, pointers
+
+
+def build_prompt(role, lane, role_file, role_text, pointers):
+    lines = [f"You are the {role.capitalize()} for this repository. Follow your role file, quoted below, exactly.",
+             "Project rules and commands are in AGENTS.md at the checkout root.", "", pointers]
+    if role == "reviewer":
+        lines += ["", f"Run ONE lane: {LANES[lane]}.",
+                  "Never edit the checkout. Do not read PR comments, other verdicts, or the Builder's evidence.",
+                  "Output only the filled verdict."]
+    lines += ["", f"--- {role_file} ---", role_text]
+    return "\n".join(lines)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("role", choices=ROLES)
+    p.add_argument("target", nargs="?", type=int, help="PR number for the reviewer, issue number otherwise")
+    p.add_argument("--harness", choices=sorted(DEFAULTS), default="claude")
+    p.add_argument("--lane", choices=sorted(LANES))
+    p.add_argument("--model")
+    p.add_argument("--effort")
+    p.add_argument("--timeout", type=int, default=1200, help="seconds")
+    p.add_argument("--dry-run", action="store_true", help="print the command and prompt; start nothing")
+    a = p.parse_args()
+
+    if a.role == "reviewer" and (a.target is None or a.lane is None):
+        p.error("reviewer needs a PR number and --lane")
+    if a.role != "reviewer" and a.lane:
+        p.error("--lane is for the reviewer only")
+    if a.role == "builder" and a.target is None:
+        p.error("builder needs an issue number")
+
+    root = sh("git", "rev-parse", "--show-toplevel")
+    model = a.model or DEFAULTS[a.harness]["model"]
+    effort = a.effort or DEFAULTS[a.harness]["effort"]
+    profile = profile_for(a.role, a.lane)
+    role_file = f"{roles_dir(root)}/{a.role}.md"
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name = "-".join(x for x in (stamp, a.role, a.lane, a.harness) if x)
+    runs = os.path.join(root, ".verify", "runs")
+    os.makedirs(runs, exist_ok=True)
+    run_dir = tempfile.mkdtemp(prefix="dry-", dir=runs) if a.dry_run else os.path.join(runs, name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    try:
+        worktree, sha, pointers = prepare_target(root, a.role, a.target, run_dir)
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"run-role: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}")
+    with open(os.path.join(worktree, role_file)) as fh:
+        prompt = build_prompt(a.role, a.lane, role_file, fh.read(), pointers)
+    argv, stdin = build_command(a.harness, profile, model, effort, prompt, run_dir)
+
+    if a.dry_run:
+        print(json.dumps({"argv": argv[:-1] if stdin is None else argv, "profile": profile, "sha": sha}, indent=2))
+        print(prompt)
+        sh("git", "worktree", "remove", "--force", worktree, cwd=root)
+        if a.role == "builder":
+            sh("git", "branch", "-D", f"issue-{a.target}", cwd=root)
+        shutil.rmtree(run_dir)
+        return 0
+
+    with open(os.path.join(run_dir, "prompt.md"), "w") as fh:
+        fh.write(prompt)
+    meta = {"role": a.role, "lane": a.lane, "target": a.target, "harness": a.harness, "model": model,
+            "effort": effort, "profile": profile, "sha": sha, "worktree": worktree,
+            "started": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    # The Reviewer must not reach PR comments through gh: give it an empty gh config.
+    env = dict(os.environ)
+    if a.role == "reviewer":
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+        env["GH_CONFIG_DIR"] = tempfile.mkdtemp(prefix="gh-empty-")
+
+    print(f"run-role: {name} in {run_dir}", file=sys.stderr)
+    with open(os.path.join(run_dir, "output.md"), "w") as out, open(os.path.join(run_dir, "stderr.log"), "w") as err:
+        try:
+            code = subprocess.run(argv, cwd=worktree, input=stdin, text=True, stdout=out, stderr=err,
+                                  stdin=None if stdin is not None else subprocess.DEVNULL,
+                                  env=env, timeout=a.timeout).returncode
+        except subprocess.TimeoutExpired:
+            code = EXIT_TIMEOUT
+
+    if profile != "write":
+        changed = sh("git", "status", "--porcelain", cwd=worktree)
+        moved = sh("git", "rev-parse", "HEAD", cwd=worktree) != sha
+        meta["checkout_clean"] = not changed and not moved
+        if meta["checkout_clean"]:
+            sh("git", "worktree", "remove", "--force", worktree, cwd=root)
+        elif code == 0:
+            code = EXIT_CHECKOUT_MODIFIED
+    meta.update(exit=code, finished=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    with open(os.path.join(run_dir, "meta.json"), "w") as fh:
+        json.dump(meta, fh, indent=2)
+    print(f"run-role: exit {code}; output in {run_dir}/output.md", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

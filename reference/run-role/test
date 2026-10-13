@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Offline tests for run-role: permissions per role and lane, and how each harness is invoked."""
+import importlib.machinery
+import importlib.util
+import os
+import unittest
+
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-role")
+loader = importlib.machinery.SourceFileLoader("run_role", path)
+spec = importlib.util.spec_from_loader("run_role", loader)
+run_role = importlib.util.module_from_spec(spec)
+loader.exec_module(run_role)
+
+EDIT_TOOLS = {"claude": {"Edit", "Write"}, "pi": {"edit", "write"}}
+
+
+def allowed(harness, argv):
+    flag = {"claude": "--allowedTools", "pi": "--tools"}[harness]
+    return set(argv[argv.index(flag) + 1].split(","))
+
+
+class Permissions(unittest.TestCase):
+    def test_reviewer_lanes(self):
+        self.assertEqual(run_role.profile_for("reviewer", "standards"), "inspect")
+        self.assertEqual(run_role.profile_for("reviewer", "spec"), "drive")
+        self.assertEqual(run_role.profile_for("reviewer", "regression"), "drive")
+        for role in ("planner", "builder", "coordinator", "gardener"):
+            self.assertEqual(run_role.profile_for(role, None), "write")
+
+    def test_reviewer_can_never_edit(self):
+        for profile in ("inspect", "drive"):
+            for harness, tools in EDIT_TOOLS.items():
+                argv, _ = run_role.build_command(harness, profile, "m", "e", "P", "/run")
+                self.assertFalse(allowed(harness, argv) & tools, (harness, profile))
+            argv, _ = run_role.build_command("claude", profile, "m", "e", "P", "/run")
+            self.assertIn("Edit", argv[argv.index("--disallowedTools") + 1].split(","))
+
+    def test_inspect_cannot_run_commands(self):
+        for harness in ("claude", "pi"):
+            argv, _ = run_role.build_command(harness, "inspect", "m", "e", "P", "/run")
+            self.assertFalse(allowed(harness, argv) & {"Bash", "bash"}, harness)
+        argv, _ = run_role.build_command("codex", "inspect", "m", "e", "P", "/run")
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+
+    def test_builder_can_edit(self):
+        for harness, tools in EDIT_TOOLS.items():
+            argv, _ = run_role.build_command(harness, "write", "m", "e", "P", "/run")
+            self.assertTrue(tools <= allowed(harness, argv), harness)
+
+
+class Invocation(unittest.TestCase):
+    def test_model_and_effort_always_pinned(self):
+        cases = {"claude": ["--model", "M", "--effort", "E"],
+                 "codex": ["-m", "M", "-c", "model_reasoning_effort=E"],
+                 "pi": ["--model", "M", "--thinking", "E"]}
+        for harness, expected in cases.items():
+            argv, _ = run_role.build_command(harness, "inspect", "M", "E", "P", "/run")
+            joined = " ".join(argv)
+            self.assertIn(" ".join(expected), joined, harness)
+
+    def test_claude_prompt_on_stdin(self):
+        # A positional prompt after --allowedTools is swallowed by the variadic flag.
+        argv, stdin = run_role.build_command("claude", "inspect", "m", "e", "PROMPT", "/run")
+        self.assertEqual(stdin, "PROMPT")
+        self.assertNotIn("PROMPT", argv)
+
+    def test_codex_and_pi_prompt_last(self):
+        for harness in ("codex", "pi"):
+            argv, stdin = run_role.build_command(harness, "inspect", "m", "e", "PROMPT", "/run")
+            self.assertIsNone(stdin)
+            self.assertEqual(argv[-1], "PROMPT")
+
+    def test_reviewer_prompt_forbids_other_verdicts(self):
+        prompt = run_role.build_prompt("reviewer", "spec", "roles/reviewer.md", "ROLE", "PTR")
+        self.assertIn("spec + live proof", prompt)
+        self.assertIn("Do not read PR comments, other verdicts, or the Builder's evidence", prompt)
+        self.assertTrue(prompt.endswith("ROLE"))
+
+    def test_every_harness_has_defaults(self):
+        for harness in run_role.PROFILES["inspect"]:
+            self.assertTrue(run_role.DEFAULTS[harness]["model"] and run_role.DEFAULTS[harness]["effort"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=0)
