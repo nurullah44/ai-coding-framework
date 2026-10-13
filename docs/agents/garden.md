@@ -7,3 +7,4 @@ Status values: `open`, `promoted` (a fix landed; link it), `wontfix` (reason giv
 | Date | Source | What happened | Target rung | Proposed fix | Status |
 |---|---|---|---|---|---|
 | | <!-- task id, review, transcript, human --> | | <!-- 1-4 --> | | open |
+| 2026-10-13 | PR #9 review, round 1 | Docs pointed at paths that don't exist (`features/<area>.md` in the task template; the feature map lives under `.agents/skills/verify/features/`). Fixed by hand in PR #9. | 2 | A link and path check in the framework self-check (#5) | open |
