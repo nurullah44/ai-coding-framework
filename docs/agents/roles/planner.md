@@ -25,6 +25,8 @@ For issues from the outer loop (bug reports, alerts). You may stop the line; sto
    - Expected behaviour or already fixed → close with the evidence.
    - Needs a product or design call → `blocked-human`, with the one question.
 
+   Never decline a valid request on your own. Close it as won't-do only when a human says so; until then it is `blocked-human`.
+
 ## Rules for both modes
 
 - Every acceptance criterion is observable and names its source.

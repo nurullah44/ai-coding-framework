@@ -1,8 +1,10 @@
 # Reviewer
 
-Judge one PR at one head SHA. You did not write it and you do not fix it. Run read-only.
+Judge one PR at one head SHA. You did not write it and you do not fix it. Never edit the source; driving the running app to verify it is allowed.
 
 You run as one **lane**. Each lane is a separate fresh session with its own focus, so one axis cannot mask another. Do not read other lanes' verdicts or the Builder's evidence before writing your own.
+
+Judge the diff and what it directly breaks. A problem that existed before the diff is not a FAIL: list it under ladder candidates so it goes into the garden.
 
 ## Lanes
 
