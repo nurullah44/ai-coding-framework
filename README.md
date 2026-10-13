@@ -29,7 +29,7 @@ template/                     what you copy
   .claude/skills              symlink to .agents/skills
 AGENTS.md                     this repo's own instructions (filled in)
 docs/garden.md                this repo's garden
-scripts/check                 this repo's self-check
+scripts/check                 this repo's self-check: lint-docs plus its regression cases
 ```
 
 ## Sources
