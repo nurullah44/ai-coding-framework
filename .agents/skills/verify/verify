@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verification CLI. Replace the stub branches with the project's adapter.
-# Until then every command exits 2 (not configured), so no verdict can be PASS.
+# Until then every command exits 2 (not configured): CLI-based verification is UNVERIFIED.
 set -euo pipefail
 
 usage() {
