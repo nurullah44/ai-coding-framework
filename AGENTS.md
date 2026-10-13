@@ -1,31 +1,36 @@
 # AGENTS.md
 
-This repo develops the template in `template/`. Work by the template's own process (`template/docs/agents/`), using the commands and paths below.
+Always loaded. Keep it short. Detail lives in `docs/agents/`; read it when the condition says so.
 
 ## Commands
 
+Fill these in per project. If a command is missing, say so. Do not invent one.
+
+<!-- Check is one command that runs every fast gate: lint, typecheck, unit tests. Until it exists, no work can be PASS. Verify stays as is; implement its adapter (see the `verify` skill). -->
+
 | Purpose | Command | Notes |
 |---|---|---|
-| Install | none | Needs `bash` and `python3` |
-| Check | `./scripts/check` | Framework self-check. Must be green before any handoff |
-| Verify | none | No app to drive. A docs change follows "No runtime behaviour" in `template/.agents/skills/verify/SKILL.md`; a `scripts/` change proves itself with a regression case in `scripts/check` |
+| Install | `TODO` | |
+| Check (lint + typecheck + unit tests) | `TODO` | Must be green before any handoff |
+| Verify (drive the real app) | `.agents/skills/verify/verify <cmd>` | See the `verify` skill |
 
 ## Hard rules
 
-1. **Evidence, not claims.** "Done" means `check` is green and the proof named in the task's verification plan ran and matched the acceptance criteria. If that proof could not run, the result is `UNVERIFIED`, which never counts as PASS.
-2. **Fix upward.** When you correct a mistake or work around one, log it in `docs/garden.md` with the highest rung of the trust ladder that could prevent it. See `template/docs/agents/trust-ladder.md`.
+1. **Evidence, not claims.** "Done" means `check` is green and the proof named in the task's verification plan ran and matched the acceptance criteria. If that proof could not run (for example, `verify` is not configured), the result is `UNVERIFIED`, which never counts as PASS.
+2. **Fix upward.** When you correct a mistake or work around one, log it in `docs/agents/garden.md` with the highest rung of the trust ladder that could prevent it. See `docs/agents/trust-ladder.md`.
 3. **No workaround comments.** Do not leave a comment explaining why the real problem was not solved. Fix it, or log it in the garden and say so in your report.
-4. **One blessed way.** Extend the existing pattern. If two patterns exist for the same thing, ask.
+4. **One blessed way.** Extend the existing pattern. If two patterns exist for the same thing, use the one named in `docs/agents/invariants.md`, or ask.
 5. **Use the tool, don't rewrite it.** If a script or CLI exists for a mechanical job, call it. If you write the same throwaway script twice, propose it as a tool.
 6. **One-way doors need a human.** Changes that touch the paths below never merge without human approval, whatever the autonomy level.
 
 ## One-way doors
 
-- `AGENTS.md`, `template/AGENTS.md`
-- `template/docs/agents/process.md`, `template/docs/agents/trust-ladder.md`, `template/docs/agents/roles/**`
-- `scripts/check`, `.github/workflows/**`
+<!-- Globs. Examples: migrations/**, auth/**, billing/**, infra/**, anything that deletes user data. -->
+- `TODO`
 
 ## Read when
 
-- Running or taking part in the task loop → `template/docs/agents/process.md` and your role file in `template/docs/agents/roles/`
-- Changing anything in `template/` → it must stay project-neutral: no filled-in commands, no garden entries, no harness or model named except as an example (#11)
+- Running or taking part in the task loop → `docs/agents/process.md` and your role file in `docs/agents/roles/`
+- Correcting an agent or fixing a recurring mistake → `docs/agents/trust-ladder.md`
+- Adding or changing a rule the code must never break → `docs/agents/invariants.md`
+- Proving a change works → the `verify` skill (`.agents/skills/verify/SKILL.md`)
