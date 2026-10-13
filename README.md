@@ -13,11 +13,12 @@ Agents scale only as far as you trust their output. This template gives a projec
 - **A task loop:** issues move through plan → build → independent review → merge, with evidence at each step.
 - **A small always-loaded context:** only `AGENTS.md` and skill descriptions load every session; everything else loads per role.
 
+There is deliberately no `CLAUDE.md`. Claude Code loads `AGENTS.md` by itself only when there is no `CLAUDE.md`. If you add one (`/init` creates it), make its first line `@AGENTS.md` so the import loads it, or the rules stop loading.
+
 ## Layout
 
 ```
 AGENTS.md                 always loaded; commands, hard rules, pointers
-CLAUDE.md                 @AGENTS.md
 docs/agents/              process, trust ladder, invariants, roles, templates
 .agents/skills/verify/    verification contract, stub CLI, feature map
 .claude/skills            symlink to .agents/skills
