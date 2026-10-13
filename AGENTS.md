@@ -8,7 +8,7 @@ This repo develops the template in `template/`. Work by the template's own proce
 |---|---|---|
 | Install | none | Needs `bash` and `python3` |
 | Check | `./scripts/check` | Framework self-check. Must be green before any handoff |
-| Verify | none | Docs only. Every change follows "No runtime behaviour" in `template/.agents/skills/verify/SKILL.md`; the task names the proof |
+| Verify | none | No app to drive. A docs change follows "No runtime behaviour" in `template/.agents/skills/verify/SKILL.md`; a `scripts/` change proves itself with a regression case in `scripts/check` |
 
 ## Hard rules
 

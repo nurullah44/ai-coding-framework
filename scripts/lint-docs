@@ -97,15 +97,16 @@ def check_paths():
         with open(md) as fh:
             # HTML comments hold examples, not pointers.
             text = re.sub(r"<!--.*?-->", "", fh.read(), flags=re.S)
-        for m in re.finditer(r"`([^`\s]+)`", text):
-            ref = m.group(1)
+        # In a command like `verify/verify <cmd>`, the path is the first word.
+        for m in re.finditer(r"`([^`\n]*[^`\s][^`\n]*)`", text):
+            ref = m.group(1).split()[0]
             if not ("/" in ref or ref.endswith(".md")) or skip(ref):
                 continue
             part = fixed_part(ref)
             if part and not resolves(part, md):
                 fail(f"{rel(md)}: path `{ref}` does not exist")
         # Markdown links (inline and reference-style) resolve from the linking file only.
-        links = re.findall(r"\]\(([^)\s]+)\)", text) + re.findall(r"^\s*\[[^\]]+\]:\s*(\S+)", text, flags=re.M)
+        links = re.findall(r"\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)", text) + re.findall(r"^\s*\[[^\]]+\]:\s*(\S+)", text, flags=re.M)
         for link in links:
             target = link.split("#")[0]
             if not skip(target) and not os.path.exists(os.path.join(os.path.dirname(md), target)):

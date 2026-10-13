@@ -12,8 +12,14 @@ failed=0
 expect() {
   local want="$1" name="$2" mutation="$3" scratch got
   # A setup error must not pass as the expected failure.
-  if ! scratch="$(mktemp -d)" || ! cp -a "$root/." "$scratch/" || ! (cd "$scratch" && eval "$mutation"); then
+  if ! scratch="$(mktemp -d)"; then
+    echo "FAIL lint-docs regression: '$name' could not create a scratch dir"
+    failed=1
+    return
+  fi
+  if ! cp -a "$root/." "$scratch/" || ! (cd "$scratch" && eval "$mutation"); then
     echo "FAIL lint-docs regression: '$name' could not set up its scratch copy"
+    rm -rf "$scratch"
     failed=1
     return
   fi
@@ -34,6 +40,8 @@ expect 1 "missing path in backticks" 'echo "see \`docs/agents/nope.md\`" >> temp
 expect 1 "broken relative link" 'echo "[x](roles/ghost.md)" >> template/docs/agents/process.md'
 expect 1 "broken reference-style link" 'printf "[x][g]\n\n[g]: roles/ghost.md\n" >> template/docs/agents/process.md'
 expect 1 "placeholder path under a missing directory" 'sed -i "s#\`.agents/skills/verify/features/<area>.md\`#\`features/<area>.md\`#" template/docs/agents/templates/task.md'
+expect 1 "broken link with a title" 'echo "[x](roles/ghost.md \"Ghost\")" >> template/docs/agents/process.md'
+expect 1 "broken path inside a command" 'sed -i "s#verify/verify <cmd>#verify/nope <cmd>#" template/AGENTS.md'
 expect 1 "link whose name exists only in an ancestor" 'echo "[x](AGENTS.md)" >> template/docs/agents/process.md'
 expect 1 "task template H2 renamed" 'sed -i "s/^## Out of scope/## Scope/" template/docs/agents/templates/task.md'
 expect 1 "verdict template H2 removed" 'sed -i "/^## Not covered/d" template/docs/agents/templates/verdict.md'
