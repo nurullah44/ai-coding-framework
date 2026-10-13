@@ -81,7 +81,13 @@ def resolves(ref, md_path):
 
 def skip(target):
     return (not target or "://" in target or target.startswith(("/", "@", "-"))
-            or any(c in target for c in "<>*") or target in CREATED_BY_PROJECT)
+            or target in CREATED_BY_PROJECT)
+
+
+def fixed_part(target):
+    """For a pattern like `features/<area>.md` or `roles/**`, the directory before the first placeholder."""
+    cut = min((target.index(c) for c in "<*" if c in target), default=None)
+    return target if cut is None else target[:cut].rpartition("/")[0]
 
 
 def check_paths():
@@ -93,13 +99,17 @@ def check_paths():
             text = re.sub(r"<!--.*?-->", "", fh.read(), flags=re.S)
         for m in re.finditer(r"`([^`\s]+)`", text):
             ref = m.group(1)
-            if ("/" in ref or ref.endswith(".md")) and not skip(ref) and not resolves(ref, md):
+            if not ("/" in ref or ref.endswith(".md")) or skip(ref):
+                continue
+            part = fixed_part(ref)
+            if part and not resolves(part, md):
                 fail(f"{rel(md)}: path `{ref}` does not exist")
-        # Markdown links resolve from the linking file only, as a renderer would.
-        for m in re.finditer(r"\]\(([^)\s]+)\)", text):
-            target = m.group(1).split("#")[0]
+        # Markdown links (inline and reference-style) resolve from the linking file only.
+        links = re.findall(r"\]\(([^)\s]+)\)", text) + re.findall(r"^\s*\[[^\]]+\]:\s*(\S+)", text, flags=re.M)
+        for link in links:
+            target = link.split("#")[0]
             if not skip(target) and not os.path.exists(os.path.join(os.path.dirname(md), target)):
-                fail(f"{rel(md)}: link `{m.group(1)}` does not exist")
+                fail(f"{rel(md)}: link `{link}` does not exist")
 
 
 def check_headings():

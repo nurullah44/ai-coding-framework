@@ -11,9 +11,12 @@ failed=0
 # expect <exit code> <description> <shell that breaks a scratch copy>
 expect() {
   local want="$1" name="$2" mutation="$3" scratch got
-  scratch="$(mktemp -d)"
-  cp -a "$root/." "$scratch/"
-  (cd "$scratch" && eval "$mutation")
+  # A setup error must not pass as the expected failure.
+  if ! scratch="$(mktemp -d)" || ! cp -a "$root/." "$scratch/" || ! (cd "$scratch" && eval "$mutation"); then
+    echo "FAIL lint-docs regression: '$name' could not set up its scratch copy"
+    failed=1
+    return
+  fi
   "$scratch/scripts/lint-docs" > "$scratch/.out" 2>&1
   got=$?
   if [ "$got" -ne "$want" ]; then
@@ -24,11 +27,13 @@ expect() {
   rm -rf "$scratch"
 }
 
-expect 1 "AGENTS.md over the line budget" 'yes x | head -60 >> template/AGENTS.md'
-expect 1 "51st line without a trailing newline" '{ cat AGENTS.md; yes x | head -n $((50 - $(wc -l < AGENTS.md))); printf x; } > a && mv a AGENTS.md'
+expect 1 "AGENTS.md over the line budget" 'seq 60 >> template/AGENTS.md'
+expect 1 "51st line without a trailing newline" '{ cat AGENTS.md; seq $((50 - $(wc -l < AGENTS.md))); printf x; } > a && mv a AGENTS.md'
 expect 1 "AGENTS.md over the token budget" 'head -c 4000 /dev/zero | tr "\0" a >> template/AGENTS.md'
 expect 1 "missing path in backticks" 'echo "see \`docs/agents/nope.md\`" >> template/docs/agents/process.md'
 expect 1 "broken relative link" 'echo "[x](roles/ghost.md)" >> template/docs/agents/process.md'
+expect 1 "broken reference-style link" 'printf "[x][g]\n\n[g]: roles/ghost.md\n" >> template/docs/agents/process.md'
+expect 1 "placeholder path under a missing directory" 'sed -i "s#\`.agents/skills/verify/features/<area>.md\`#\`features/<area>.md\`#" template/docs/agents/templates/task.md'
 expect 1 "link whose name exists only in an ancestor" 'echo "[x](AGENTS.md)" >> template/docs/agents/process.md'
 expect 1 "task template H2 renamed" 'sed -i "s/^## Out of scope/## Scope/" template/docs/agents/templates/task.md'
 expect 1 "verdict template H2 removed" 'sed -i "/^## Not covered/d" template/docs/agents/templates/verdict.md'
