@@ -82,11 +82,20 @@ def roles_dir(root):
 
 
 def fetch(root, ref):
-    """Fetch a ref over HTTPS with gh's credentials, so it works without an SSH key."""
+    """Fetch a ref over HTTPS with gh's credentials, so it works without an SSH key. Return its SHA.
+
+    FETCH_HEAD is not used: parallel runs would overwrite each other's.
+    """
     url = gh_json("repo", "view", "--json", "url")["url"] + ".git"
-    subprocess.run(["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-                    "fetch", "-q", url, ref], cwd=root, check=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    return sh("git", "rev-parse", "FETCH_HEAD", cwd=root)
+    git = ["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    full = ref if ref.startswith("pull/") else f"heads/{ref}"
+    listed = subprocess.run([*git, "ls-remote", url, f"refs/{full}"], cwd=root, check=True,
+                            capture_output=True, text=True, env=env).stdout.split()
+    if not listed:
+        sys.exit(f"run-role: {ref} not found on {url}")
+    subprocess.run([*git, "fetch", "-q", "--no-write-fetch-head", url, ref], cwd=root, check=True, env=env)
+    return listed[0]
 
 
 def prepare_target(root, role, number, run_dir):
