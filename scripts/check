@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export PYTHONDONTWRITEBYTECODE=1
 # Framework self-check: lint the docs, then prove the lint catches each rule it enforces.
 set -uo pipefail
 
@@ -53,6 +54,8 @@ expect 1 "skills symlink to another skills dir" 'mkdir -p template/other/verify 
 expect 1 "CLAUDE.md without @AGENTS.md" 'echo "# notes" > CLAUDE.md'
 expect 1 "root hard rule renamed" 'sed -i "s/One blessed way/Single pattern/" AGENTS.md'
 expect 1 "template points at reference/" 'echo "Use \`reference/run-role\`." >> template/docs/agents/process.md'
+expect 1 "tracked bytecode" 'mkdir -p x/__pycache__ && touch x/__pycache__/m.pyc && git add -f x/__pycache__/m.pyc'
+expect 0 "Markdown under .verify/ is not linted" 'mkdir -p .verify/runs/r && echo "see \`nope/missing.md\`" > .verify/runs/r/prompt.md'
 expect 0 "CLAUDE.md that imports AGENTS.md" 'printf "@AGENTS.md\n" > CLAUDE.md'
 expect 0 "valid feature entry" 'printf "## Sub-features\n## How to get to it (user POV)\n## Driving it with verify\n## Gotchas\n" > template/.agents/skills/verify/features/login.md'
 

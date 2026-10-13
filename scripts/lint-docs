@@ -44,9 +44,13 @@ def rel(path):
     return os.path.relpath(path, ROOT)
 
 
+# Not source: git internals and generated output (gitignored).
+SKIP_DIRS = {".git", ".verify", "__pycache__"}
+
+
 def markdown_files():
     for base, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d != ".git"]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for f in files:
             if f.endswith(".md"):
                 yield os.path.join(base, f)
@@ -162,6 +166,7 @@ def check_hard_rules_match():
 def check_template_independent():
     """The template must work without reference/: it may not point at it (#11)."""
     for base, dirs, files in os.walk(TEMPLATE):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for f in files:
             path = os.path.join(base, f)
             if os.path.islink(path):
@@ -169,6 +174,17 @@ def check_template_independent():
             with open(path, errors="ignore") as fh:
                 if re.search(r"(?<![\w-])reference/", fh.read()):
                     fail(f"{rel(path)}: mentions reference/; the template must not depend on it")
+
+
+def check_no_build_output_tracked():
+    tracked = sh_lines("git", "ls-files")
+    for path in tracked:
+        if "__pycache__/" in path or path.endswith(".pyc"):
+            fail(f"{path}: build output is tracked; it belongs in .gitignore")
+
+
+def sh_lines(*argv):
+    return subprocess.run(argv, cwd=ROOT, check=True, capture_output=True, text=True).stdout.splitlines()
 
 
 CHECKS = [
@@ -180,6 +196,7 @@ CHECKS = [
     check_claude_md,
     check_hard_rules_match,
     check_template_independent,
+    check_no_build_output_tracked,
 ]
 
 for check in CHECKS:
