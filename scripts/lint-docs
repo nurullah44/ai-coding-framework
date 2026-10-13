@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Docs lint. Fails when the repo or the template breaks its own rules. Run via scripts/check."""
+"""Repo lint: docs, template contracts, and tracked files. Fails when the repo or the template breaks its own rules.
+Run via scripts/check."""
 import os
 import re
 import subprocess
@@ -14,7 +15,10 @@ BYTES_PER_TOKEN = 4  # deterministic estimate for English prose; no tokenizer de
 
 # Paths the docs name that a project creates later, so they need not exist here.
 CREATED_BY_PROJECT = {"CLAUDE.md", "GLOSSARY.md", "docs/adr/"}
-GENERATED = ".verify/"  # gitignored output of verify and run-role
+GENERATED = (".verify/artifacts/", ".verify/runs/")  # gitignored output of verify and run-role
+
+# Not source: git internals and generated output (gitignored).
+SKIP_DIRS = {".git", ".verify", "__pycache__"}
 
 # Historical logs quote paths as they were; they are not pointers.
 NOT_POINTERS = {os.path.join(ROOT, "docs", "garden.md")}
@@ -42,10 +46,6 @@ def fail(msg):
 
 def rel(path):
     return os.path.relpath(path, ROOT)
-
-
-# Not source: git internals and generated output (gitignored).
-SKIP_DIRS = {".git", ".verify", "__pycache__"}
 
 
 def markdown_files():
@@ -86,7 +86,7 @@ def resolves(ref, md_path):
 
 def skip(target):
     return (not target or "://" in target or target.startswith(("/", "@", "-"))
-            or target in CREATED_BY_PROJECT or target.startswith(GENERATED))
+            or target in CREATED_BY_PROJECT or target == ".verify/" or target.startswith(GENERATED))
 
 
 def fixed_part(target):
@@ -177,14 +177,10 @@ def check_template_independent():
 
 
 def check_no_build_output_tracked():
-    tracked = sh_lines("git", "ls-files")
-    for path in tracked:
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    for path in tracked.splitlines():
         if "__pycache__/" in path or path.endswith(".pyc"):
             fail(f"{path}: build output is tracked; it belongs in .gitignore")
-
-
-def sh_lines(*argv):
-    return subprocess.run(argv, cwd=ROOT, check=True, capture_output=True, text=True).stdout.splitlines()
 
 
 CHECKS = [

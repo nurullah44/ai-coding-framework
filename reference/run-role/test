@@ -15,7 +15,6 @@ import tempfile
 import threading
 import unittest
 
-sys.dont_write_bytecode = True
 RUN_ROLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-role")
 
 STUB_GH = r'''#!/usr/bin/env python3
@@ -46,6 +45,9 @@ if mode == "edit":
 elif mode == "artifact":
     os.makedirs(".verify/artifacts", exist_ok=True)
     open(".verify/artifacts/proof.txt", "w").write("proof\n")
+elif mode == "commit":
+    import subprocess
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
 elif mode == "hang":
     time.sleep(30)
 print("# Verdict: PASS")
@@ -152,11 +154,15 @@ class RunRole(unittest.TestCase):
         self.assertEqual(pi["argv"][pi["argv"].index("--tools") + 1], "read,grep,find,ls")
 
     def test_spec_lane_runs_commands_but_never_edits(self):
-        for harness in ("claude", "pi"):
-            self.assertEqual(self.run_role("reviewer", "1", "--lane", "spec", "--harness", harness).returncode, 0)
-        claude, pi = self.calls()
-        self.assertEqual(claude["argv"][claude["argv"].index("--tools") + 1], "Read,Grep,Glob,Bash")
-        self.assertEqual(pi["argv"][pi["argv"].index("--tools") + 1], "read,grep,find,ls,bash")
+        for lane in ("spec", "regression"):
+            for harness in ("claude", "codex", "pi"):
+                self.assertEqual(self.run_role("reviewer", "1", "--lane", lane, "--harness", harness).returncode, 0)
+        calls = self.calls()
+        self.assertEqual(len(calls), 6)
+        for claude, codex, pi in (calls[:3], calls[3:]):
+            self.assertEqual(claude["argv"][claude["argv"].index("--tools") + 1], "Read,Grep,Glob,Bash")
+            self.assertEqual(codex["argv"][codex["argv"].index("--sandbox") + 1], "workspace-write")
+            self.assertEqual(pi["argv"][pi["argv"].index("--tools") + 1], "read,grep,find,ls,bash")
 
     def test_reviewer_that_edits_the_checkout_fails(self):
         r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "codex", mode="edit")
@@ -164,6 +170,22 @@ class RunRole(unittest.TestCase):
         meta = self.meta(self.runs()[0])
         self.assertFalse(meta["checkout_clean"])
         self.assertTrue(os.path.isdir(meta["worktree"]), "a modified worktree is kept for inspection")
+
+    def test_reviewer_that_moves_head_fails(self):
+        r = self.run_role("reviewer", "1", "--lane", "regression", "--harness", "pi", mode="commit")
+        self.assertEqual(r.returncode, 3)
+        self.assertFalse(self.meta(self.runs()[0])["checkout_clean"])
+
+    def test_missing_harness_still_records_the_exit(self):
+        # A PATH with gh but no codex.
+        bin_dir = os.path.join(self.tmp, "bin-no-codex")
+        os.makedirs(bin_dir)
+        os.symlink(os.path.join(self.tmp, "bin", "gh"), os.path.join(bin_dir, "gh"))
+        r = subprocess.run([RUN_ROLE, "reviewer", "1", "--lane", "spec", "--harness", "codex"], cwd=self.root,
+                           env={**self.env, "PATH": bin_dir + os.pathsep + "/usr/bin:/bin"},
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertEqual(self.meta(self.runs()[0])["exit"], 127)
 
     def test_captured_evidence_outlives_the_worktree(self):
         r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "pi", mode="artifact")

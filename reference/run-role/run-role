@@ -37,6 +37,7 @@ CODEX_SANDBOX = {"inspect": "read-only", "drive": "workspace-write", "write": "w
 
 EXIT_CHECKOUT_MODIFIED = 3
 EXIT_TIMEOUT = 124
+EXIT_HARNESS_MISSING = 127
 
 # Fetch over HTTPS with gh's credentials, so it works without an SSH key.
 GIT_VIA_GH = ["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
@@ -208,6 +209,9 @@ def main():
                                   env=env, timeout=a.timeout).returncode
         except subprocess.TimeoutExpired:
             code = EXIT_TIMEOUT
+        except FileNotFoundError:
+            err.write(f"run-role: {argv[0]} is not installed or not on PATH\n")
+            code = EXIT_HARNESS_MISSING
 
     # Evidence the run captured (verify writes .verify/artifacts/) outlives the worktree.
     captured = os.path.join(worktree, ".verify")

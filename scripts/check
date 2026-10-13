@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-export PYTHONDONTWRITEBYTECODE=1
-# Framework self-check: lint the docs, then prove the lint catches each rule it enforces.
+# Framework self-check: lint the repo, test run-role, then prove the lint catches each rule it enforces.
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +18,12 @@ expect() {
     failed=1
     return
   fi
-  if ! cp -a "$root/." "$scratch/" || ! (cd "$scratch" && eval "$mutation"); then
+  # The copy gets its own git index: in a linked worktree, a copied .git file
+  # points at the real repo, and a mutation's `git add` would stage there.
+  # Generated output (.verify/) is left out.
+  if ! tar -C "$root" --exclude=./.git --exclude=./.verify -cf - . | tar -C "$scratch" -xf - \
+      || ! (cd "$scratch" && git init -q && git add -A) \
+      || ! (cd "$scratch" && eval "$mutation"); then
     echo "FAIL lint-docs regression: '$name' could not set up its scratch copy"
     rm -rf "$scratch"
     failed=1
