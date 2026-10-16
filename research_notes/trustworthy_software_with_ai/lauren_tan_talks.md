@@ -41,7 +41,7 @@ In T, trust depends on an environment that makes correct behavior observable and
 
 ### Cited Findings
 
-#### T — standalone talk, published 2026-09-21; full transcript read, 00:01–38:00
+#### T: standalone talk, published 2026-09-21; full transcript read, 00:01–38:00
 
 - **Thesis / trust before parallelism.** At 00:34–00:55 she argues that a well-prepared agent environment can produce high-quality code faster. At 05:29–06:42, the initial state is one to five agents requiring constant correction; spawning a hundred before trusting their work scales regressions. At 04:24–05:08 she says PR volume was not her original goal: “That was not a goal of mine at all.” [T, 04:24–06:42](https://www.youtube.com/watch?v=Z-jNqqIYGm4&t=264s).
 - **Verification origin: replace a manual observation bottleneck.** At 02:28–04:13 she describes performance problems in Cursor's Agents Window, manually capturing Chrome performance traces and heap snapshots, and asking whether an agent could run the application, locate hot spots and hill-climb performance itself. This is a concrete performance workflow, not evidence that all forms of verification are solved. [T, 02:28–04:13](https://www.youtube.com/watch?v=Z-jNqqIYGm4&t=148s).
@@ -64,7 +64,7 @@ In T, trust depends on an environment that makes correct behavior observable and
 
 **Silence in T, after a full read:** no worked prose spec, spec-review procedure, ticket template, task dependency example, per-ticket “done” contract, explicit reviewer/QA role separation, model-routing recipe, authentication/authorization design, network topology or security-layer implementation. The app-boundary example and low-reasoning-agent claim above are present; these absent details must not be imported from her written pstack files. [Full T, 00:01–38:02](https://youtu.be/Z-jNqqIYGm4).
 
-#### P — Matt Pocock live interview, 2026-10-02; full transcript read, 00:00–65:35
+#### P: Matt Pocock live interview, 2026-10-02; full transcript read, 00:00–65:35
 
 - **First-hand chronology, correcting an earlier inference in the companion.** At 05:22–05:28 Lauren says: “I joined Cursor in March.” The performance-work period was probably early April, in her recollection. At 02:09–04:27 she describes a side project after Meta, initial skills and the open-source noodle repository; she was initially iterating without a good measure of skill impact. This provides spoken context only; the repository itself is covered in the companion. [P, 02:09–05:28](https://www.youtube.com/watch?v=MN9dGgmLyso&t=129s).
 - **Frontier models still take shortcuts.** At 06:01–06:21 she says even frontier agents take the easy path and asks how to make that path the correct one. She likes Opus 5.5 (07:08–07:14), but does not provide a small-versus-frontier routing recipe here. [P, 06:01–07:14](https://www.youtube.com/watch?v=MN9dGgmLyso&t=361s).
@@ -85,7 +85,7 @@ In T, trust depends on an environment that makes correct behavior observable and
 
 **Silence in P, after a full read:** no start-to-finish formal project lifecycle, worked PRD/spec, written spec-review example, per-ticket fields or acceptance template, task dependency graph, prescribed PM/reviewer/QA separation, exact small-model model-routing policy, or security/network architecture. There is clear evidence for coordinators, builders and verifier agents, triage/reproduction stages, small feature directories, and post-merge sampling. [Full P, 00:00–65:36](https://www.youtube.com/live/MN9dGgmLyso).
 
-#### W — Maven/Lenny's workshop with Colin Matthews, 2026-08-12; full transcript read, 00:00–59:40
+#### W: Maven/Lenny's workshop with Colin Matthews, 2026-08-12; full transcript read, 00:00–59:40
 
 - **Trust chart is illustrative, not measured science.** At 03:06–05:57 she describes confident but incorrect diagnoses and the management parallel: without trust she micromanages. She explicitly calls the chart “not a very scientific chart” (04:13–04:19). She reports moving from observing one/few agents to waking up to about twenty merged PRs and reviewing them on main (05:17–05:50). At 06:56–07:09 she reports a thousand PRs in the previous month and almost eight hundred by the twelfth of this month. These are self-reported contribution counts, not proof of quality or equivalent tasks. [W, 03:06–07:21](https://www.youtube.com/watch?v=Cmoh-yR-usA&t=186s).
 - **Verification is the first skill, but correctness and quality are separate.** At 07:38–08:37 she names real application execution, CPU traces, heap snapshots and iOS simulators. “it doesn't guarantee your agent writes good code” (08:23–08:29); it supplies a correctness loop. At 09:05–11:59 she describes manually investigating Agents Window performance under a one-week launch deadline, then making control-glass to give agents programmatic app access. Human screenshots/error copying had been the bottleneck. [W, 07:38–11:59](https://www.youtube.com/watch?v=Cmoh-yR-usA&t=458s).
@@ -107,7 +107,7 @@ In T, trust depends on an environment that makes correct behavior observable and
 
 **Silence in W, after a full read:** no worked spec/PRD, spec adversarial-review process, ticket-field format, per-ticket “done” example, network topology, firewall/transport implementation, authentication/authorization architecture or PM/engineer/reviewer/QA role matrix. It does contain an eval stopping criterion, atomic PR advice, application/process import boundaries, and the brief credential-restriction example. [Full W, 00:00–59:41](https://www.youtube.com/watch?v=Cmoh-yR-usA).
 
-#### Y — Peter Yang / Behind the Craft, published 2026-09-27; full transcript read, 00:00–45:03
+#### Y: Peter Yang / Behind the Craft, published 2026-09-27; full transcript read, 00:00–45:03
 
 Recording: [We Built Grok Bot. Here Are Our 14 Best Bots | Peng Zheng & Lauren Tan](https://www.youtube.com/watch?v=xZ5TEaleUdg), **45:04**, Peter Yang's channel. Publication date is metadata; exact recording date: **not found**. The conversation includes Peng Zheng's workflow and Lauren's; do not attribute both to Lauren.
 
@@ -126,7 +126,7 @@ Recording: [We Built Grok Bot. Here Are Our 14 Best Bots | Peng Zheng & Lauren T
 
 **Silence in Lauren's Y turns:** worked spec contents, plan approval/checking method, ticket format, acceptance criteria per task, separate named QA/reviewer contracts, application module/layer examples, and security/network architecture. She covers phases, Notion planning, decomposition, supervisor boundaries, cloud workers, model choice by task and observed trust graduation. [Full Y](https://www.youtube.com/watch?v=xZ5TEaleUdg).
 
-#### M — MTS with Roshan Sadanani, published 2026-08-13; full available transcript read
+#### M: MTS with Roshan Sadanani, published 2026-08-13; full available transcript read
 
 [Are Agents About to Replace Software Engineering? | Lauren Tan and Roshan Sadanani](https://www.youtube.com/watch?v=A63sedG-p5Q), **28:41** YouTube metadata; English captions end **28:25**. The publisher's [Apple episode](https://podcasts.apple.com/jp/podcast/are-agents-about-to-replace-software-engineering-lauren/id1891088763?i=1000783207982) is dated **2026-08-13, 22:00 UTC**, rounded to 29 minutes. The date is publication; exact interview-recording date: **not found**. MTS's interview host is not named in the returned description. All speaker attribution below follows the interview turns; Roshan's product claims are kept separate.
 

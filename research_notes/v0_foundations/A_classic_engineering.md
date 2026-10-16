@@ -1,4 +1,4 @@
-# A — Classic engineering foundations for a small web product
+# A: Classic engineering foundations for a small web product
 
 Retrieved: **2026-10-16**. Scope: manual engineering, v0, approximately 0–5,000 users. Search queries used: **18**; other source pages were opened directly. No video claims.
 

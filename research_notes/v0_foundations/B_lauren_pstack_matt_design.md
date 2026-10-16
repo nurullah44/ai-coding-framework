@@ -1,4 +1,4 @@
-# B — Architecture and system design in the delivery loop
+# B: Architecture and system design in the delivery loop
 
 Retrieved: **2026-10-16**. Builds on the existing Lauren written/code and talk notes, Matt/pstack notes, and the report's Lauren/template sections. This note adds placement, product boundaries, enforcement and growth findings. No video claims are used.
 
