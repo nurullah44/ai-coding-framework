@@ -24,6 +24,7 @@ Fill these in per project. If a command is missing, say so. Do not invent one.
 6. **One-way doors need a human.** Changes that touch the paths below never merge without human approval, whatever the autonomy level.
 7. **One thing at a time.** Finish the current task and close it (merged, branch deleted, issue closed) before starting the next.
 8. **Only what is used.** Add a file, rule, skill or tool only when a real problem needs it.
+9. **English, no em dashes.** Everything in this repo is in English: file contents, file and folder names, commit messages, PRs and issues. No text uses an em dash (the long dash, U+2014).
 
 ## One-way doors
 

@@ -7,7 +7,7 @@
 ## Acceptance criteria
 
 <!-- Each criterion is observable. Source = issue, human decision, ADR, or feature-map entry. -->
-- [ ] <criterion> — source: <link or quote>
+- [ ] <criterion> (source: <link or quote>)
 
 ## Verification plan
 
