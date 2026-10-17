@@ -24,6 +24,12 @@
 
 <Files, libraries, prior decisions, one-way doors touched (if any, this task is L0).>
 
+## Budget
+
+- Estimated peak context: <tokens, at most 90k; see `process.md`>
+- Builder: Haiku | Opus (only with the reason splitting would be wasteful)
+- Measured peak context: <filled in by the Coordinator after the build>
+
 ## Blocked by
 
 <Task links, or "none".>

@@ -14,6 +14,26 @@ Work lives in GitHub Issues and PRs. Labels carry the state.
 
 Without a Coordinator, the human plays that part.
 
+## Models
+
+Always pass the model and effort explicitly; never rely on a harness default.
+
+| Role | Harness | Model | Effort |
+|---|---|---|---|
+| Planner | Claude Code | `claude-opus-5-5` | xhigh |
+| Builder | Claude Code | `claude-haiku-5-5` | max |
+| Builder, for a ticket too big to split | Claude Code | `claude-opus-5-5` | medium |
+| Reviewer, every lane | Codex | `gpt-6.1-sol` | xhigh |
+
+## Ticket budget
+
+The budget is the builder's peak context (what the model holds at once), not the total tokens spent.
+
+- Plan every ticket to fit in 90k. An empty Haiku session in Claude Code already starts at about 18.5k (measured 2026-10-17).
+- If a ticket will surely need more than 100k and splitting it would be wasteful, the Planner marks it for the Opus builder and says why.
+- The ticket states its estimate. After the build, the Coordinator writes the measured peak next to it, so estimates can be checked against reality.
+- Nothing stops a builder at the limit yet. Until a guard exists, runs up to about 120k are tolerated and recorded.
+
 ## Flow
 
 ```
