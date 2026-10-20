@@ -5,7 +5,11 @@ description: Drive the running app like a user and capture evidence that a chang
 
 # Verify
 
-`./.agents/skills/verify/verify --help` is canonical. Always use this CLI. Never write a one-off driver script; if the CLI is missing a command you need, say so and log it in `docs/agents/garden.md`.
+`./.agents/skills/verify/verify --help` is canonical. Always use this CLI. Never write a one-off driver script.
+
+When the CLI is missing a command that a path in the ticket needs, a Builder adds the command in the same change, with a test, and drives the path. A Reviewer, who never edits, lists the path under "Not covered" and logs the gap in `docs/agents/garden.md`.
+
+This file is the contract. Each project builds the adapter behind it, starting with the first ticket that has runtime behaviour, and documents its own commands here as it adds them.
 
 ## Command contract
 
@@ -18,8 +22,11 @@ Every project implements these. The adapter behind them is stack-specific (brows
 | `drive <action> …` | Performs one user-level action | 0 / non-zero |
 | `evidence <name>` | Captures an artifact (screenshot, trace, response, log) into `.verify/artifacts/` | 0 / non-zero |
 | `sweep` | Walks `features/README.md` in order for a broad regression | 0 all pass |
+| `sweep <file>` | Runs one feature-map file | 0 all pass |
 
 Exit code 2 means verification is not configured. The verdict is then `UNVERIFIED`, never PASS.
+
+A scenario that needs the running instance across several commands runs as one shell command (`verify start && ... && verify stop`) or as a feature-map block under `sweep`. Some harnesses (Codex, for one) stop a command's background processes when that command ends.
 
 ## No runtime behaviour
 

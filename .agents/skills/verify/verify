@@ -11,7 +11,7 @@ verify <command> [args]
   start | stop        start/stop an isolated instance for this checkout
   drive <action> ...  perform one user-level action
   evidence <name>     capture an artifact into .verify/artifacts/
-  sweep               walk features/README.md in order
+  sweep [<file>]      walk features/README.md in order, or run one feature file
 
 Exit codes: 0 ok, 1 failure, 2 not configured.
 EOF
