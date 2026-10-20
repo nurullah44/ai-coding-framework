@@ -70,7 +70,7 @@ flowchart LR
 - **Only a blocking finding fails a PR.** [`roles/reviewer.md`](roles/reviewer.md) says what blocks. Everything else is a note, and a note never fails a PR.
 - **A fix round fixes findings only.** Work discovered after the PR opened becomes a new ticket.
 - **Heavy checks run once.** While building, the Builder runs only the tests for what changed. It runs the full `check` and `verify sweep` once, before it reports a code-ready commit. CI runs `check` on every push.
-- **Escalation.** The Builder gets two rounds. The third round runs at higher effort. A third FAIL means `blocked-human`; say whether the rounds failed on the same finding or on new ones, since the human decides differently.
+- **Escalation.** The Builder gets two rounds. The third round runs at higher effort. A third FAIL means `blocked-human`. `tools/run-role` counts the failed rounds and enforces both; say whether the rounds failed on the same finding or on new ones, since the human decides differently.
 - **One at a time.** One Builder runs at a time, on one ticket (principle 6).
 
 ## Autonomy level

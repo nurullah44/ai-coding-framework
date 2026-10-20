@@ -50,10 +50,10 @@ Six roadmap steps: a skeleton (check, CI, verify), short links and redirects, a 
 
 ## Open gaps carried into this version
 
+Fixed after v1: `run-role wait` waits on run dirs instead of process names, and a fix round is told its round number, escalates after two failed rounds, and is refused after three.
+
 These are known, not fixed yet:
 
-- `run-role` has no `wait` command, so a Coordinator writes its own wait loop.
-- Nothing cleans up what a Builder or Reviewer leaves running.
-- A fix round is not told its round number.
+- Nothing cleans up what a Builder or Reviewer leaves behind (containers, images, files). What is left depends on the project, so the fix belongs in each project's `verify` (for example a `verify stop` that removes everything `verify` started).
 - Nothing stops a Builder that goes far past its context budget.
 - The success test of this framework (a newcomer, with only this repo, is led through a project) has not been run yet.

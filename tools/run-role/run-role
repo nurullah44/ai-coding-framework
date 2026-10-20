@@ -5,6 +5,8 @@
     run-role builder <issue> [--harness ...]
     run-role builder <issue> --pr <n> [--harness ...]     (a fix round on the PR's branch)
     run-role planner|coordinator [<issue>] [--harness ...]
+    run-role <role> ... --background                       (start the run, print its run dir once it exists, return)
+    run-role wait [<run-dir>...] [--timeout <seconds>]    (wait for runs to end; no run dir: every unfinished run)
 
 Every run starts in the project checkout, which run-role switches for it, and keeps a run directory under .verify/runs/.
 """
@@ -14,6 +16,8 @@ import datetime
 import fcntl
 import json
 import os
+import re
+import time
 import shutil
 import subprocess
 import sys
@@ -43,6 +47,13 @@ CODEX_SANDBOX = {"inspect": "read-only", "drive": "workspace-write", "write": "w
 EXIT_CHECKOUT_MODIFIED = 3
 EXIT_TIMEOUT = 124
 EXIT_MISSING_TOOL = 127
+
+# Escalation (docs/agents/process.md): fix rounds after this many failed rounds use the third-round row,
+# and a Builder is refused once MAX_FAILED_ROUNDS rounds have failed.
+ESCALATE_AFTER_FAILED_ROUNDS = 2
+MAX_FAILED_ROUNDS = 3
+THIRD_ROUND_ROW = "Builder, third round (after two FAIL rounds)"
+COMMIT_IN_VERDICT = re.compile(r"(?:Commit|Head SHA): `?([0-9a-f]{7,40})")
 
 # The usage fields that make up the context the model holds. Output tokens are not context.
 CONTEXT_TOKENS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -181,17 +192,33 @@ def resolve_target(root, role, number, fix_pr=None):
 
 
 def resolve_fix_round(root, url, issue, number):
-    """A Builder's fix round on PR number: the PR's branch at its head, and the latest verdict of each lane."""
+    """A Builder's fix round on PR number: the PR's branch at its head, the latest verdict of each lane, and the round number."""
     pr = gh_json("pr", "view", str(number), "--json", "headRefName,headRefOid,comments")
     branch = pr["headRefName"]
     sha = resolve(root, url, branch)
     if sha != pr["headRefOid"]:
         sys.exit(f"run-role: remote has {sha}, but PR #{number} head is {pr['headRefOid']}")
+    failed = failed_rounds(pr["comments"])
+    if failed >= MAX_FAILED_ROUNDS:
+        sys.exit(f"run-role: PR #{number} has failed {failed} review rounds; label issue #{issue} blocked-human "
+                 "for a human to decide (docs/agents/process.md, Escalation)")
     verdicts = latest_verdicts(pr["comments"]) or ["No verdict is posted on the PR yet."]
-    return {"sha": sha, "files": {}, "branch": branch,
+    return {"sha": sha, "files": {}, "branch": branch, "round": failed + 1,
             "pointers": (f"Checkout: the project checkout, on branch `{branch}` at {{sha}}, the head of PR #{number}. "
-                         f"This is a fix round: read the issue with `gh issue view {issue}`."),
+                         f"This is a fix round, building for review round {failed + 1} after {failed} failed "
+                         f"round(s): read the issue with `gh issue view {issue}`."),
             "extra": [f"Latest verdicts on PR #{number}, one per lane:\n\n" + "\n\n---\n\n".join(verdicts)]}
+
+
+def failed_rounds(comments):
+    """How many reviewed commits got at least one FAIL verdict. A verdict names its commit as `Commit:` or `Head SHA:`."""
+    failed = set()
+    for comment in comments:
+        body = comment["body"]
+        commit = COMMIT_IN_VERDICT.search(body)
+        if body.startswith("# Verdict: FAIL") and commit:
+            failed.add(commit.group(1)[:7])
+    return len(failed)
 
 
 def latest_verdicts(comments):
@@ -308,7 +335,95 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_state(run_dir):
+    """("done", exit) once meta.json is written; ("died", None) when its run-role process is gone without one; else ("running", None)."""
+    meta = os.path.join(run_dir, "meta.json")
+    if os.path.exists(meta):
+        with open(meta) as fh:
+            return "done", json.load(fh).get("exit")
+    try:
+        with open(os.path.join(run_dir, "pid")) as fh:
+            pid = int(fh.read())
+    except (OSError, ValueError):
+        return "died", None
+    return ("running", None) if alive(pid) else ("died", None)
+
+
+def background(args):
+    """Start this run detached, its stderr in .verify/launch/; print its run dir once the run has made it."""
+    root = sh("git", "rev-parse", "--show-toplevel")
+    launch = os.path.join(root, ".verify", "launch")
+    os.makedirs(launch, exist_ok=True)
+    fd, log = tempfile.mkstemp(prefix="run-role-", suffix=".log", dir=launch)
+    with os.fdopen(fd, "w") as err:
+        child = subprocess.Popen([sys.executable, os.path.abspath(__file__), *args], cwd=root, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+    announced = re.compile(r"^run-role: (/.+)$", re.M)
+    while True:
+        with open(log) as fh:
+            text = fh.read()
+        found = announced.search(text)
+        if found and os.path.isdir(found.group(1)):
+            print(found.group(1))
+            return 0
+        if child.poll() is not None:
+            sys.stderr.write(text)
+            return child.returncode
+        time.sleep(0.1)
+
+
+def wait(argv):
+    """Wait for runs by their run dirs, never by matching process names, which can match the waiting command itself."""
+    p = argparse.ArgumentParser(prog="run-role wait", description=wait.__doc__)
+    p.add_argument("run_dirs", nargs="*", help="default: every run under .verify/runs that has not ended")
+    p.add_argument("--timeout", type=int, default=7200, help="seconds; default 7200")
+    p.add_argument("--interval", type=float, default=10, help=argparse.SUPPRESS)
+    a = p.parse_args(argv)
+    run_dirs = a.run_dirs
+    if not run_dirs:
+        runs = os.path.join(sh("git", "rev-parse", "--show-toplevel"), ".verify", "runs")
+        names = sorted(os.listdir(runs)) if os.path.isdir(runs) else []
+        run_dirs = [os.path.join(runs, n) for n in names if run_state(os.path.join(runs, n))[0] == "running"]
+    for d in run_dirs:
+        if not os.path.isdir(d):
+            sys.exit(f"run-role wait: {d} is not a run dir")
+    deadline = time.monotonic() + a.timeout
+    pending = list(run_dirs)
+    worst = 0
+    while pending:
+        for d in list(pending):
+            state, code = run_state(d)
+            if state == "running":
+                continue
+            pending.remove(d)
+            if state == "died":
+                print(f"{d}: ended without meta.json; its run-role process is gone")
+                worst = worst or 1
+            else:
+                print(f"{d}: exit {code}")
+                worst = worst or (1 if code else 0)
+        if pending and time.monotonic() >= deadline:
+            for d in pending:
+                print(f"{d}: still running after {a.timeout}s")
+            return EXIT_TIMEOUT
+        if pending:
+            time.sleep(a.interval)
+    return worst
+
+
 def main():
+    if sys.argv[1:2] == ["wait"]:
+        return wait(sys.argv[2:])
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("role", choices=ROLES)
     p.add_argument("target", nargs="?", type=int, help="PR number for the reviewer, issue number otherwise")
@@ -319,7 +434,10 @@ def main():
     p.add_argument("--timeout", type=int, help="seconds; default 3600 for a builder, 1200 otherwise")
     p.add_argument("--pr", type=int, help="builder: a fix round on this PR's branch, with its latest verdicts in the prompt")
     p.add_argument("--dry-run", action="store_true", help="print the command and prompt; change no checkout or branch, create no run dir")
+    p.add_argument("--background", action="store_true", help="start the run detached, print its run dir once it exists, and return")
     a = p.parse_args()
+    if a.background and not a.dry_run:
+        return background([x for x in sys.argv[1:] if x != "--background"])
 
     if a.role == "reviewer" and (a.target is None or a.lane is None):
         p.error("reviewer needs a PR number and --lane")
@@ -338,6 +456,8 @@ def main():
     except subprocess.CalledProcessError as e:
         sys.exit(f"run-role: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}")
     row = table.get(TABLE_ROLE.get(a.role))
+    if a.pr is not None and target["round"] > ESCALATE_AFTER_FAILED_ROUNDS and THIRD_ROUND_ROW in table:
+        row = table[THIRD_ROUND_ROW]
     if row is None and not (a.model and a.effort):
         p.error(f"{a.role} has no row in the Models table, so it needs --model and --effort")
     harness = a.harness or (row["harness"] if row else "claude")
@@ -389,6 +509,8 @@ def main():
             "peak_context_tokens": None, "quota_five_hour_start": None, "quota_five_hour_end": None,
             "thinking_tokens": None}
 
+    with open(os.path.join(run_dir, "pid"), "w") as fh:
+        fh.write(f"{os.getpid()}\n")
     print(f"run-role: {run_dir}", file=sys.stderr)
     stdout_path = os.path.join(run_dir, "stream.jsonl" if harness == "claude" else "output.md")
     with open(stdout_path, "w") as out, open(os.path.join(run_dir, "stderr.log"), "w") as err:
