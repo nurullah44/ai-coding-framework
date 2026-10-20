@@ -18,7 +18,7 @@ Work on two tracks:
    - the autonomy level allows it and no one-way door is touched.
 
    If CI is red or the branch needs a rebase, send it back to the Builder. If only the autonomy level or a one-way door blocks, label `blocked-human` with a one-line ask.
-6. **Watch for stuck work.** Progress means side effects: commits, pushes, PR comments, check results. A session past its expected time with none is stuck; stop it and start a fresh one from the ticket. Wait on a run by its exit, never by matching a process name, which can match the wait loop itself.
+6. **Watch for stuck work.** Progress means side effects: commits, pushes, PR comments, check results. A session past its expected time with none is stuck; stop it and start a fresh one from the ticket. Wait on runs with `tools/run-role/run-role wait`, never by matching a process name, which can match the wait loop itself.
 7. **Record.** Write the Builder's measured peak context into the ticket. Log ladder candidates from the verdicts in the garden.
 8. Repeat until the stop condition holds.
 

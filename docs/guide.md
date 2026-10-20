@@ -110,9 +110,10 @@ tools/run-role/run-role builder 12                     # build issue #12
 tools/run-role/run-role reviewer 15 --lane spec        # spec + live proof on PR #15
 tools/run-role/run-role reviewer 15 --lane standards   # standards on PR #15
 tools/run-role/run-role builder 12 --pr 15             # a fix round on PR #15
+tools/run-role/run-role wait                           # wait until every started run has ended
 ```
 
-Each run is a fresh session with the model from the Models table and only the permissions its role needs. Its output and measurements are kept under `.verify/runs/`.
+Each run is a fresh session with the model from the Models table and only the permissions its role needs. Its output and measurements are kept under `.verify/runs/`. Add `--background` to start a run and get its run dir back at once; `run-role wait` waits for runs to end.
 
 ## Phase 4: end of the step, tend the garden
 

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 
 RUN_ROLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-role")
@@ -413,6 +414,37 @@ class RunRole(unittest.TestCase):
         self.assertNotIn("looks good", prompt, "only verdicts")
         self.assertEqual(self.worktrees(), 1)
 
+    def failed_verdict(self, sha, lane="standards"):
+        return {"body": f"# Verdict: FAIL\n\nLane: {lane}\nPR: #4 · Commit: {sha} · Issue: #7\n\nfinding at {sha}"}
+
+    def test_fix_round_names_its_round_and_escalates_after_two_failed_rounds(self):
+        self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
+        builder, third = models_table()["Builder"], models_table()["Builder, third round (after two FAIL rounds)"]
+        self.push_pr_for_branch("issue-7", [self.failed_verdict("aaaaaaa"), self.failed_verdict("aaaaaaa", "spec")])
+        r = self.run_role("builder", "7", "--pr", "4", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan, _ = json.JSONDecoder().raw_decode(r.stdout)
+        self.assertEqual((plan["model"], plan["effort"]), (builder[1], builder[2]), "two lanes failing one commit is one round")
+        self.assertIn("review round 2 after 1 failed round(s)", r.stdout)
+        self.push_pr_for_branch("issue-7", [self.failed_verdict("aaaaaaa"), {"body": "# Verdict: PASS\n\nLane: spec\nPR: #4 · Commit: aaaaaaa"},
+                                            self.failed_verdict("bbbbbbbbbb")])
+        r = self.run_role("builder", "7", "--pr", "4", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan, _ = json.JSONDecoder().raw_decode(r.stdout)
+        self.assertEqual((plan["model"], plan["effort"]), (third[1], third[2]))
+        self.assertIn("review round 3 after 2 failed round(s)", r.stdout)
+        plan = self.dry_run("builder", "7", "--pr", "4", "--effort", "low")
+        self.assertEqual(plan["effort"], "low", "a flag still overrides the row")
+
+    def test_fix_round_is_refused_after_three_failed_rounds(self):
+        self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
+        self.push_pr_for_branch("issue-7", [self.failed_verdict(sha) for sha in ("aaaaaaa", "bbbbbbb", "ccccccc")])
+        r = self.run_role("builder", "7", "--pr", "4", "--harness", "claude")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("blocked-human", r.stderr)
+        self.assertEqual(len(self.calls()), 1, "no harness started for the refused round")
+        self.assertEqual(len(self.runs()), 1)
+
     def test_fix_round_refuses_a_local_branch_that_is_not_at_the_pr_head(self):
         self.assertEqual(self.run_role("reviewer", "1", "--lane", "spec", "--pr", "4").returncode, 2)
         self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
@@ -444,6 +476,74 @@ class RunRole(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, ".verify")))
         self.assertEqual(self.branch(), "pr1", "the checkout is not switched")
         self.assertEqual(git(self.root, "branch", "--list", "issue-8"), "")
+
+    # wait
+
+    def wait(self, *args):
+        return subprocess.run([RUN_ROLE, "wait", *args], cwd=self.root, env=self.env, capture_output=True, text=True)
+
+    def test_wait_reports_each_finished_run_and_fails_when_one_failed(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude").returncode, 0)
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "spec", "--harness", "claude", mode="fail").returncode, 7)
+        by_lane = {self.meta(run)["lane"]: run for run in self.runs()}
+        ok, failed = by_lane["standards"], by_lane["spec"]
+        with open(os.path.join(ok, "pid")) as fh:
+            self.assertTrue(fh.read().strip().isdigit(), "a run records its run-role pid")
+        r = self.wait(ok)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"{ok}: exit 0", r.stdout)
+        r = self.wait(ok, failed)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"{failed}: exit 7", r.stdout)
+        self.assertEqual(self.wait().returncode, 0, "no unfinished run: nothing to wait for")
+        self.assertEqual(self.wait(os.path.join(self.tmp, "nope")).returncode, 1)
+
+    def test_wait_without_run_dirs_waits_for_every_unfinished_run(self):
+        run = subprocess.Popen([RUN_ROLE, "reviewer", "1", "--lane", "standards", "--harness", "claude", "--timeout", "3"],
+                               cwd=self.root, env={**self.env, "STUB_MODE": "hang"},
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(run.wait)
+        deadline = time.time() + 10
+        while not (self.runs() and os.path.exists(os.path.join(self.runs()[0], "pid"))):
+            self.assertLess(time.time(), deadline, "the run dir never appeared")
+            time.sleep(0.05)
+        r = self.wait("--timeout", "1", "--interval", "0.1")
+        self.assertEqual(r.returncode, 124, "still running at the wait's own timeout")
+        self.assertIn("still running", r.stdout)
+        r = self.wait("--interval", "0.1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"{self.runs()[0]}: exit 124", r.stdout)
+
+    def test_background_prints_the_run_dir_and_wait_follows_it(self):
+        starts = [self.run_role("reviewer", "1", "--lane", lane, "--harness", "claude", "--background", mode="rendezvous")
+                  for lane in ("spec", "standards")]
+        for r in starts:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        dirs = [r.stdout.strip() for r in starts]
+        for d in dirs:
+            self.assertTrue(os.path.isfile(os.path.join(d, "pid")), d)
+        r = self.wait(*dirs)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for d in dirs:
+            self.assertIn(f"{d}: exit 0", r.stdout)
+        self.assertEqual(len(self.calls()), 2, "both lanes ran, at the same time")
+
+    def test_background_returns_the_refusal_of_a_run_that_cannot_start(self):
+        r = self.run_role("reviewer", "2", "--lane", "spec", "--background")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("links no issue", r.stderr)
+        self.assertEqual(self.runs(), [])
+
+    def test_wait_reports_a_run_whose_process_died_without_meta(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        run = os.path.join(self.root, ".verify", "runs", "dead-run")
+        os.makedirs(run)
+        with open(os.path.join(run, "pid"), "w") as fh:
+            fh.write(f"{dead.pid}\n")
+        r = self.wait(run)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ended without meta.json", r.stdout)
 
     # Models table
 
