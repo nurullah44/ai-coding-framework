@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Start one framework role as a fresh, headless session in Claude Code or Codex.
+
+    run-role reviewer <pr> --lane spec|standards|regression [--harness ...]
+    run-role builder <issue> [--harness ...]
+    run-role builder <issue> --pr <n> [--harness ...]     (a fix round on the PR's branch)
+    run-role planner|coordinator [<issue>] [--harness ...]
+
+Every run starts in the project checkout, which run-role switches for it, and keeps a run directory under .verify/runs/.
+"""
+import argparse
+import contextlib
+import datetime
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# The Models table in docs/agents/process.md is the one place the defaults are written. A run reads
+# its role's row from the commit it starts from. A role whose row is missing has no default model:
+# it must be given --model and --effort.
+TABLE_ROLE = {"planner": "Planner", "builder": "Builder", "reviewer": "Reviewer, every lane", "coordinator": "Coordinator"}
+TABLE_HARNESS = {"Claude Code": "claude", "Codex": "codex"}
+
+# Model and effort per harness, for a role that --harness moves off its row. Our defaults.
+# A project that adopts this reference sets its own.
+DEFAULTS = {
+    "claude": {"model": "claude-opus-5-5", "effort": "high"},
+    "codex": {"model": "gpt-6.1-sol", "effort": "xhigh"},
+}
+
+ROLES = ["planner", "builder", "reviewer", "coordinator"]
+LANES = {"spec": "spec + live proof", "standards": "standards", "regression": "regression"}
+
+# The tools each kind of run gets. "inspect" reads only; "drive" also runs commands
+# (to drive the app or run check) but must leave the checkout unchanged; "write" edits.
+TOOLS = {"inspect": "Read,Grep,Glob", "drive": "Read,Grep,Glob,Bash", "write": "Read,Grep,Glob,Bash,Edit,Write"}
+CODEX_SANDBOX = {"inspect": "read-only", "drive": "workspace-write", "write": "workspace-write"}
+
+EXIT_CHECKOUT_MODIFIED = 3
+EXIT_TIMEOUT = 124
+EXIT_MISSING_TOOL = 127
+
+# The usage fields that make up the context the model holds. Output tokens are not context.
+CONTEXT_TOKENS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+# Fetch over HTTPS with gh's credentials, so it works without an SSH key.
+GIT_VIA_GH = ["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
+NO_PROMPT = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def profile_for(role, lane):
+    if role == "reviewer":
+        return "inspect" if lane == "standards" else "drive"
+    return "write"
+
+
+def build_command(harness, profile, model, effort, prompt, run_dir):
+    """Return (argv, stdin)."""
+    if harness == "claude":
+        # --tools sets what exists; --allowedTools only auto-approves. No MCP servers from user config.
+        # The prompt goes on stdin: a positional prompt after a variadic tool flag is swallowed.
+        # stream-json logs every model call, so the answer and the context used can be read back.
+        tools = TOOLS[profile]
+        return ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model, "--effort", effort,
+                "--add-dir", run_dir, "--tools", tools, "--allowedTools", tools, "--strict-mcp-config"], prompt
+    # The spec and regression lanes drive the app over HTTP and fetch public sources, so they get network.
+    network = ["-c", "sandbox_workspace_write.network_access=true"] if profile == "drive" else []
+    return ["codex", "exec", "-m", model, "-c", f"model_reasoning_effort={effort}",
+            "--sandbox", CODEX_SANDBOX[profile], *network, prompt], None
+
+
+def stream_events(path):
+    """The JSON objects in a stream-json log. Other lines are skipped: the CLI may print text too."""
+    with open(path) as fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                yield event
+
+
+def final_answer(path):
+    """The result of the last result event, or "" if the run never got that far."""
+    results = [event.get("result") or "" for event in stream_events(path) if event.get("type") == "result"]
+    return results[-1] if results else ""
+
+
+def peak_context(path):
+    """Largest input-side token count of any one assistant event: the most context the model held at once."""
+    sizes = [sum(event["message"]["usage"].get(k, 0) for k in CONTEXT_TOKENS) for event in stream_events(path)
+             if event.get("type") == "assistant" and (event.get("message") or {}).get("usage")]
+    return max(sizes, default=None)
+
+
+def dig(obj, *keys):
+    """obj[k1][k2]..., or None where a key is missing."""
+    for key in keys:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def five_hour_quota(path):
+    """The five-hour window's utilization at the first and last rate-limit event: (start, end), or (None, None)."""
+    used = [dig(event, "rate_limit_info", "unifiedWindows", "five_hour", "utilization")
+            for event in stream_events(path) if event.get("type") == "rate_limit_event"]
+    used = [u for u in used if u is not None]
+    return (used[0], used[-1]) if used else (None, None)
+
+
+def thinking_tokens(path):
+    """Tokens spent thinking, summed over the thinking_tokens events, or None if the stream has none."""
+    deltas = [event.get("estimated_tokens_delta", 0) for event in stream_events(path)
+              if event.get("type") == "system" and event.get("subtype") == "thinking_tokens"]
+    return sum(deltas) if deltas else None
+
+
+def sh(*argv, cwd=None, env=None):
+    return subprocess.run(argv, cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def gh_json(*argv):
+    return json.loads(sh("gh", *argv))
+
+
+def head(root):
+    return sh("git", "rev-parse", "HEAD", cwd=root)
+
+
+def local_sha(root, branch):
+    """SHA of a local branch, or None if there is none."""
+    done = subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cwd=root, capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def resolve(root, url, ref):
+    """SHA of a remote ref, fetched into the object store. FETCH_HEAD is not used: parallel runs share it."""
+    full = ref if ref.startswith("pull/") else f"heads/{ref}"
+    listed = sh(*GIT_VIA_GH, "ls-remote", url, f"refs/{full}", cwd=root, env=NO_PROMPT).split()
+    if not listed:
+        sys.exit(f"run-role: {ref} not found on {url}")
+    sh(*GIT_VIA_GH, "fetch", "-q", "--no-write-fetch-head", url, ref, cwd=root, env=NO_PROMPT)
+    return listed[0]
+
+
+def resolve_target(root, role, number, fix_pr=None):
+    """Find what the run checks out and what it may read. Changes nothing but the object store."""
+    url = gh_json("repo", "view", "--json", "url")["url"] + ".git"
+    if fix_pr is not None:
+        return resolve_fix_round(root, url, number, fix_pr)
+    if role != "reviewer":
+        branch = f"issue-{number}" if role == "builder" else None
+        where = f"on the new branch `{branch}` from main" if branch else "on main"
+        issue = f" Issue #{number}: read it with `gh issue view {number}`." if number is not None else ""
+        return {"sha": resolve(root, url, "main"), "files": {}, "extra": [], "branch": branch,
+                "pointers": f"Checkout: the project checkout, {where} at {{sha}}.{issue}"}
+
+    pr = gh_json("pr", "view", str(number), "--json", "headRefOid,baseRefName,closingIssuesReferences")
+    issues = [i["number"] for i in pr["closingIssuesReferences"]]
+    if not issues:
+        sys.exit(f"run-role: PR #{number} links no issue. The Reviewer judges against an issue, not the PR description.")
+    sha = resolve(root, url, f"pull/{number}/head")
+    if sha != pr["headRefOid"]:
+        sys.exit(f"run-role: remote has {sha}, but PR #{number} head is {pr['headRefOid']}")
+    base = resolve(root, url, pr["baseRefName"])
+    files = {"pr.diff": sh("git", "diff", "-M", f"{base}...{sha}", cwd=root) + "\n"}
+    for n in issues:
+        issue = gh_json("issue", "view", str(n), "--json", "title,body")
+        files[f"issue-{n}.md"] = f"# {issue['title']}\n\n{issue['body']}\n"
+    return {"sha": sha, "files": files, "branch": None, "extra": [],
+            "pointers": (f"PR #{number} at head SHA {sha}, checked out here (detached).\n"
+                         f"Spec: issue {', '.join(f'#{n}' for n in issues)}, in {{run}}/issue-*.md.\n"
+                         f"Diff against {pr['baseRefName']}: {{run}}/pr.diff.")}
+
+
+def resolve_fix_round(root, url, issue, number):
+    """A Builder's fix round on PR number: the PR's branch at its head, and the latest verdict of each lane."""
+    pr = gh_json("pr", "view", str(number), "--json", "headRefName,headRefOid,comments")
+    branch = pr["headRefName"]
+    sha = resolve(root, url, branch)
+    if sha != pr["headRefOid"]:
+        sys.exit(f"run-role: remote has {sha}, but PR #{number} head is {pr['headRefOid']}")
+    verdicts = latest_verdicts(pr["comments"]) or ["No verdict is posted on the PR yet."]
+    return {"sha": sha, "files": {}, "branch": branch,
+            "pointers": (f"Checkout: the project checkout, on branch `{branch}` at {{sha}}, the head of PR #{number}. "
+                         f"This is a fix round: read the issue with `gh issue view {issue}`."),
+            "extra": [f"Latest verdicts on PR #{number}, one per lane:\n\n" + "\n\n---\n\n".join(verdicts)]}
+
+
+def latest_verdicts(comments):
+    """The latest verdict comment of each lane, in the order the lanes were last judged."""
+    latest = {}
+    for comment in comments:
+        body = comment["body"]
+        if body.startswith("# Verdict:"):
+            lane = next((line for line in body.splitlines() if line.startswith("Lane:")), "")
+            latest.pop(lane, None)
+            latest[lane] = body
+    return list(latest.values())
+
+
+def switch_to_main(root, sha):
+    """Check out main, fast-forwarded to sha, the remote's main. Creates a missing local main at sha. Refuses a local main ahead of it or diverged from it."""
+    local = local_sha(root, "main")
+    if local is None:
+        sh("git", "switch", "-q", "-c", "main", sha, cwd=root)
+        return
+    if local != sha and subprocess.run(["git", "merge-base", "--is-ancestor", local, sha], cwd=root).returncode:
+        sys.exit(f"run-role: local main is at {local}, ahead of or diverged from the remote's main at {sha}; move it by hand")
+    sh("git", "switch", "-q", "main", cwd=root)
+    sh("git", "merge", "--ff-only", "-q", sha, cwd=root)
+
+
+def switch_to_branch(root, branch, sha):
+    """Check out a fix round's branch at the PR head. Refuses a local branch at any other commit."""
+    local = local_sha(root, branch)
+    if local not in (None, sha):
+        sys.exit(f"run-role: local branch {branch} is at {local}, not at the PR head {sha}; move it by hand")
+    if local:
+        sh("git", "switch", "-q", branch, cwd=root)
+    else:
+        sh("git", "switch", "-q", "-c", branch, sha, cwd=root)
+
+
+@contextlib.contextmanager
+def checkout_lock(root):
+    """Hold the checkout while a run checks and switches it. Parallel lanes of one PR share the checkout, so a lane
+    must not check or switch while another is writing to it."""
+    path = os.path.join(root, sh("git", "rev-parse", "--git-path", "run-role.lock", cwd=root))
+    with open(path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def detach_at(root, sha):
+    """Check out sha, detached, unless the checkout is there already."""
+    if head(root) != sha:
+        sh("git", "switch", "-q", "--detach", sha, cwd=root)
+
+
+def enter_checkout(root, role, target, fix_pr):
+    """Put the project checkout where the run starts: a Reviewer's PR head, a fix round's branch, or main and the Builder's new branch."""
+    if role == "reviewer":
+        detach_at(root, target["sha"])
+    elif fix_pr is not None:
+        switch_to_branch(root, target["branch"], target["sha"])
+    else:
+        switch_to_main(root, target["sha"])
+        if target["branch"]:
+            sh("git", "switch", "-q", "-c", target["branch"], cwd=root)
+
+
+def models_table(text):
+    """The rows of the Models table: {row name: {"harness", "model", "effort"}}."""
+    if "\n## Models\n" not in text:
+        sys.exit("run-role: docs/agents/process.md has no Models table")
+    section = text.split("\n## Models\n", 1)[1].split("\n## ", 1)[0]
+    rows = {}
+    for line in section.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 4 and not cells[0].startswith(("Role", "-")):
+            rows[cells[0]] = {"harness": TABLE_HARNESS[cells[1]], "model": cells[2], "effort": cells[3]}
+    return rows
+
+
+def in_tree(root, sha, path):
+    return subprocess.run(["git", "cat-file", "-e", f"{sha}:{path}"], cwd=root, capture_output=True).returncode == 0
+
+
+def roles_dir(root, sha):
+    for candidate in ("docs/agents/roles", "template/docs/agents/roles"):
+        if in_tree(root, sha, candidate):
+            return candidate
+    sys.exit("run-role: no roles directory (docs/agents/roles or template/docs/agents/roles)")
+
+
+def keep_evidence(root, run_dir, started):
+    """Copy the verify artifacts this run wrote (modified since it started) into the run dir, before the next run overwrites them."""
+    verify = os.path.join(root, ".verify")
+    for dirpath, _, names in os.walk(os.path.join(verify, "artifacts")):
+        for name in names:
+            src = os.path.join(dirpath, name)
+            if os.path.getmtime(src) >= started.timestamp():
+                dst = os.path.join(run_dir, "verify", os.path.relpath(src, verify))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+
+
+def build_prompt(role, lane, role_file, role_text, pointers):
+    lines = [f"You are the {role.capitalize()} for this repository. Follow your role file, quoted below, exactly.",
+             "Project rules and commands are in AGENTS.md at the checkout root.", "", pointers]
+    if role == "reviewer":
+        lines += ["", f"Run ONE lane: {LANES[lane]}.",
+                  "Never edit the checkout. Do not read PR comments, other verdicts, or the Builder's evidence.",
+                  "Output only the filled verdict."]
+    lines += ["", f"--- {role_file} ---", role_text]
+    return "\n".join(lines)
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("role", choices=ROLES)
+    p.add_argument("target", nargs="?", type=int, help="PR number for the reviewer, issue number otherwise")
+    p.add_argument("--harness", choices=sorted(DEFAULTS), help="default: the role's row in the Models table, else claude")
+    p.add_argument("--lane", choices=sorted(LANES))
+    p.add_argument("--model", help="default: the role's row in the Models table; required for a role with no row")
+    p.add_argument("--effort", help="default: the role's row in the Models table; required for a role with no row")
+    p.add_argument("--timeout", type=int, help="seconds; default 3600 for a builder, 1200 otherwise")
+    p.add_argument("--pr", type=int, help="builder: a fix round on this PR's branch, with its latest verdicts in the prompt")
+    p.add_argument("--dry-run", action="store_true", help="print the command and prompt; change no checkout or branch, create no run dir")
+    a = p.parse_args()
+
+    if a.role == "reviewer" and (a.target is None or a.lane is None):
+        p.error("reviewer needs a PR number and --lane")
+    if a.role != "reviewer" and a.lane:
+        p.error("--lane is for the reviewer only")
+    if a.role == "builder" and a.target is None:
+        p.error("builder needs an issue number")
+    if a.pr is not None and a.role != "builder":
+        p.error("--pr is for a builder's fix round only")
+    root = sh("git", "rev-parse", "--show-toplevel")
+    try:
+        target = resolve_target(root, a.role, a.target, a.pr)
+        role_file = f"{roles_dir(root, target['sha'])}/{a.role}.md"
+        role_text = sh("git", "show", f"{target['sha']}:{role_file}", cwd=root)
+        table = models_table(sh("git", "show", f"{target['sha']}:docs/agents/process.md", cwd=root))
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"run-role: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}")
+    row = table.get(TABLE_ROLE.get(a.role))
+    if row is None and not (a.model and a.effort):
+        p.error(f"{a.role} has no row in the Models table, so it needs --model and --effort")
+    harness = a.harness or (row["harness"] if row else "claude")
+    base = row if row and harness == row["harness"] else DEFAULTS[harness]
+    model = a.model or base["model"]
+    effort = a.effort or base["effort"]
+    timeout = a.timeout if a.timeout is not None else (3600 if a.role == "builder" else 1200)
+    profile = profile_for(a.role, a.lane)
+    branch = target["branch"]
+    with contextlib.nullcontext() if a.dry_run else checkout_lock(root):
+        if sh("git", "status", "--porcelain", cwd=root):
+            sys.exit("run-role: the checkout has uncommitted changes; commit or remove them, then run again")
+        if branch and a.pr is None and local_sha(root, branch):
+            sys.exit(f"run-role: branch {branch} already exists; one Builder per branch")
+        if not a.dry_run:
+            try:
+                enter_checkout(root, a.role, target, a.pr)
+            except subprocess.CalledProcessError as e:
+                sys.exit(f"run-role: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}")
+
+    where = None if a.target is None else (f"pr{a.target}" if a.role == "reviewer" else f"issue{a.target}")
+    if a.pr is not None:
+        where += f"-fix-pr{a.pr}"
+    name = "-".join(x for x in (now().strftime("%Y%m%dT%H%M%SZ"), a.role, where, a.lane, harness) if x)
+    runs = os.path.join(root, ".verify", "runs")
+    if a.dry_run:
+        run_dir = os.path.join(runs, name + "-<id>")
+    else:
+        os.makedirs(runs, exist_ok=True)
+        # Unique even when parallel runs start in the same second.
+        run_dir = tempfile.mkdtemp(prefix=name + "-", dir=runs)
+    pointers = "\n\n".join([target["pointers"].format(sha=target["sha"], run=run_dir), *target["extra"]])
+    prompt = build_prompt(a.role, a.lane, role_file, role_text, pointers)
+    argv, stdin = build_command(harness, profile, model, effort, prompt, run_dir)
+
+    if a.dry_run:
+        print(json.dumps({"argv": argv if stdin is not None else argv[:-1], "profile": profile,
+                          "harness": harness, "model": model, "effort": effort, "timeout": timeout,
+                          "sha": target["sha"]}, indent=2))
+        print(prompt)
+        return 0
+
+    for filename, content in {**target["files"], "prompt.md": prompt}.items():
+        with open(os.path.join(run_dir, filename), "w") as fh:
+            fh.write(content)
+    started = now()
+    meta = {"role": a.role, "lane": a.lane, "target": a.target, "pr": a.pr, "harness": harness, "model": model,
+            "effort": effort, "profile": profile, "sha": target["sha"], "started": started.isoformat(),
+            "peak_context_tokens": None, "quota_five_hour_start": None, "quota_five_hour_end": None,
+            "thinking_tokens": None}
+
+    print(f"run-role: {run_dir}", file=sys.stderr)
+    stdout_path = os.path.join(run_dir, "stream.jsonl" if harness == "claude" else "output.md")
+    with open(stdout_path, "w") as out, open(os.path.join(run_dir, "stderr.log"), "w") as err:
+        try:
+            code = subprocess.run(argv, cwd=root, input=stdin, text=True, stdout=out, stderr=err,
+                                  stdin=None if stdin is not None else subprocess.DEVNULL, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            code = EXIT_TIMEOUT
+        except FileNotFoundError:
+            err.write(f"run-role: {argv[0]} is not installed or not on PATH\n")
+            code = EXIT_MISSING_TOOL
+    if harness == "claude":
+        meta["peak_context_tokens"] = peak_context(stdout_path)
+        meta["quota_five_hour_start"], meta["quota_five_hour_end"] = five_hour_quota(stdout_path)
+        meta["thinking_tokens"] = thinking_tokens(stdout_path)
+        with open(os.path.join(run_dir, "output.md"), "w") as fh:
+            fh.write(final_answer(stdout_path))
+
+    keep_evidence(root, run_dir, started)
+    if profile != "write":
+        changed = sh("git", "status", "--porcelain", cwd=root)
+        moved = head(root) != target["sha"]
+        meta["checkout_clean"] = not changed and not moved
+        if not meta["checkout_clean"]:
+            code = EXIT_CHECKOUT_MODIFIED
+    meta.update(exit=code, finished=now().isoformat())
+    with open(os.path.join(run_dir, "meta.json"), "w") as fh:
+        json.dump(meta, fh, indent=2)
+    print(f"run-role: exit {code}; output in {run_dir}/output.md", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

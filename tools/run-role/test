@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""Offline tests for run-role, through its CLI.
+
+A local bare repo stands in for GitHub, and stub gh, claude and codex
+executables stand in for the real tools. The stub harness records what it was
+given and then acts as STUB_MODE says: answer, edit the checkout, commit in it,
+capture an artifact, or hang.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import unittest
+
+RUN_ROLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-role")
+
+STUB_GH = r'''#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+prs = json.loads(os.environ["STUB_PRS"])
+if a[:2] == ["repo", "view"]:
+    print(json.dumps({"url": os.environ["STUB_REMOTE"]}))
+elif a[:2] == ["pr", "view"]:
+    print(json.dumps(prs[a[2]]))
+elif a[:2] == ["issue", "view"]:
+    print(json.dumps({"title": "Issue " + a[2], "body": "Criteria for " + a[2]}))
+else:
+    sys.exit("stub gh: unexpected " + " ".join(a))
+'''
+
+STUB_HARNESS = r'''#!/usr/bin/env python3
+import json, os, sys, time
+stdin = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+with open(os.environ["STUB_LOG"], "a") as fh:
+    fh.write(json.dumps({"tool": os.path.basename(sys.argv[0]), "argv": sys.argv[1:], "stdin": stdin,
+                         "cwd": os.getcwd()}) + "\n")
+mode = os.environ.get("STUB_MODE", "answer")
+if mode in ("edit", "edit-fail"):
+    open("README.md", "a").write("edited\n")
+elif mode == "artifact":
+    os.makedirs(".verify/artifacts", exist_ok=True)
+    open(".verify/artifacts/proof.txt", "w").write("proof\n")
+elif mode == "commit":
+    import subprocess
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+elif mode == "hang":
+    time.sleep(30)
+elif mode == "rendezvous":
+    # Each lane's harness waits for the other lane's, so the two runs must overlap or this one exits 9.
+    home = os.path.dirname(os.environ["STUB_LOG"])
+    open(os.path.join(home, "arrived-%d" % os.getpid()), "w").close()
+    deadline = time.time() + 30
+    while sum(name.startswith("arrived-") for name in os.listdir(home)) < 2:
+        if time.time() > deadline:
+            sys.exit(9)
+        time.sleep(0.05)
+if "stream-json" in sys.argv:
+    # Like claude -p --output-format stream-json: a system event, a line that is not JSON,
+    # one assistant event per model call with different usage, then the result.
+    usages = [
+        {"input_tokens": 10, "cache_creation_input_tokens": 18000, "cache_read_input_tokens": 0, "output_tokens": 5},
+        {"input_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 60000, "output_tokens": 900},
+        {"input_tokens": 3, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 40000, "output_tokens": 20},
+    ]
+    def rate_limit(utilization):
+        return {"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": utilization}}}}
+    print(json.dumps({"type": "system", "subtype": "init"}))
+    print("stub noise, not JSON")
+    print(json.dumps(rate_limit(0.41)))
+    print(json.dumps({"type": "assistant", "message": {"usage": usages[0]}}))
+    print(json.dumps({"type": "system", "subtype": "thinking_tokens", "estimated_tokens_delta": 50}))
+    print(json.dumps({"type": "assistant", "message": {"usage": usages[1]}}))
+    print(json.dumps({"type": "system", "subtype": "task_started"}))
+    print(json.dumps(rate_limit(0.52)))
+    print(json.dumps({"type": "system", "subtype": "thinking_tokens", "estimated_tokens_delta": 120}))
+    print(json.dumps({"type": "assistant", "message": {"usage": usages[2]}}))
+    print(json.dumps(rate_limit(0.47)))
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "# Verdict: PASS"}))
+else:
+    print("# Verdict: PASS")
+if mode in ("fail", "edit-fail"):
+    sys.exit(7)
+'''
+
+
+def git(cwd, *argv):
+    return subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+PROCESS_MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "agents", "process.md")
+
+
+def models_table():
+    """The Models table in docs/agents/process.md, as {first cell: [harness, model, effort]}."""
+    with open(PROCESS_MD) as fh:
+        section = fh.read().split("## Models", 1)[1].split("\n## ", 1)[0]
+    rows = {}
+    for line in section.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 4 and not cells[0].startswith(("Role", "-")):
+            rows[cells[0]] = cells[1:]
+    return rows
+
+
+class RunRole(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="run-role-test-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.remote = os.path.join(self.tmp, "remote.git")
+        self.root = os.path.join(self.tmp, "repo")
+        git(self.tmp, "init", "-q", "--bare", "-b", "main", self.remote)
+        git(self.tmp, "init", "-q", "-b", "main", self.root)
+        for args in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+            git(self.root, *args)
+        os.makedirs(os.path.join(self.root, "docs/agents/roles"))
+        shutil.copy(PROCESS_MD, os.path.join(self.root, "docs/agents/process.md"))
+        for role in ("planner", "builder", "reviewer", "coordinator"):
+            with open(os.path.join(self.root, f"docs/agents/roles/{role}.md"), "w") as fh:
+                fh.write(f"# {role.capitalize()}\nROLE-FILE-{role}\n")
+        with open(os.path.join(self.root, ".gitignore"), "w") as fh:
+            fh.write(".verify/\n")
+        with open(os.path.join(self.root, "README.md"), "w") as fh:
+            fh.write("base\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "base")
+        git(self.root, "push", "-q", self.remote, "main")
+        git(self.root, "remote", "add", "origin", self.remote)
+        self.heads = {}
+        for pr in ("1", "2", "3"):
+            git(self.root, "checkout", "-q", "-b", f"pr{pr}", "main")
+            with open(os.path.join(self.root, "README.md"), "a") as fh:
+                fh.write(f"change {pr}\n")
+            git(self.root, "commit", "-qam", f"pr {pr}")
+            git(self.root, "push", "-q", self.remote, f"HEAD:refs/pull/{pr}/head")
+            self.heads[pr] = git(self.root, "rev-parse", "HEAD")
+            git(self.root, "checkout", "-q", "main")
+        prs = {pr: {"headRefOid": sha, "baseRefName": "main",
+                    "closingIssuesReferences": [] if pr == "2" else [{"number": 10 + int(pr)}]}
+               for pr, sha in self.heads.items()}
+
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        for name, body in [("gh", STUB_GH), ("claude", STUB_HARNESS), ("codex", STUB_HARNESS)]:
+            path = os.path.join(bin_dir, name)
+            with open(path, "w") as fh:
+                fh.write(body)
+            os.chmod(path, 0o755)
+        self.log = os.path.join(self.tmp, "harness.log")
+        self.env = {**os.environ, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "STUB_REMOTE": self.remote[:-4],
+                    "STUB_PRS": json.dumps(prs), "STUB_LOG": self.log}
+
+    def run_role(self, *args, mode="answer"):
+        return subprocess.run([RUN_ROLE, *args], cwd=self.root, env={**self.env, "STUB_MODE": mode},
+                              capture_output=True, text=True)
+
+    def calls(self):
+        with open(self.log) as fh:
+            return [json.loads(line) for line in fh]
+
+    def runs(self):
+        d = os.path.join(self.root, ".verify", "runs")
+        return [os.path.join(d, r) for r in sorted(os.listdir(d))] if os.path.isdir(d) else []
+
+    def meta(self, run):
+        with open(os.path.join(run, "meta.json")) as fh:
+            return json.load(fh)
+
+    def worktrees(self):
+        return git(self.root, "worktree", "list").count("\n") + 1
+
+    def branch(self):
+        return git(self.root, "rev-parse", "--abbrev-ref", "HEAD")
+
+    def dry_run(self, *args):
+        r = self.run_role(*args, "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan, _ = json.JSONDecoder().raw_decode(r.stdout)
+        return plan
+
+    def write_scratch(self):
+        with open(os.path.join(self.root, "scratch.txt"), "w") as fh:
+            fh.write("not committed\n")
+
+    # Reviewer
+
+    def test_reviewer_runs_in_the_checkout_at_the_pr_head(self):
+        r = self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call, = self.calls()
+        self.assertIn(self.heads["1"], call["stdin"])
+        self.assertIn("ROLE-FILE-reviewer", call["stdin"])
+        self.assertIn("Do not read PR comments", call["stdin"])
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.root))
+        self.assertEqual(git(self.root, "rev-parse", "HEAD"), self.heads["1"], "the checkout is left at the PR head")
+        run, = self.runs()
+        with open(os.path.join(run, "issue-11.md")) as fh:
+            self.assertIn("Criteria for 11", fh.read())
+        with open(os.path.join(run, "pr.diff")) as fh:
+            self.assertIn("+change 1", fh.read())
+        meta = self.meta(run)
+        self.assertEqual((meta["exit"], meta["checkout_clean"], meta["sha"]), (0, True, self.heads["1"]))
+        with open(os.path.join(run, "output.md")) as fh:
+            self.assertIn("Verdict: PASS", fh.read())
+        self.assertEqual(self.worktrees(), 1, "no worktree is made")
+        self.assertFalse(os.path.exists(os.path.join(run, "checkout")), "no clone is made")
+
+    def test_reviewer_refuses_a_checkout_with_uncommitted_changes(self):
+        self.write_scratch()
+        r = self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("uncommitted changes", r.stderr)
+        self.assertFalse(os.path.exists(self.log), "no harness started")
+        self.assertEqual(self.runs(), [])
+
+    def test_standards_lane_is_read_only_in_every_harness(self):
+        for harness in ("claude", "codex"):
+            self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", harness).returncode, 0)
+        claude, codex = self.calls()
+        self.assertEqual(claude["argv"][claude["argv"].index("--tools") + 1], "Read,Grep,Glob")
+        self.assertIn("--strict-mcp-config", claude["argv"])
+        self.assertEqual(codex["argv"][codex["argv"].index("--sandbox") + 1], "read-only")
+
+    def test_spec_lane_runs_commands_but_never_edits(self):
+        for lane in ("spec", "regression"):
+            for harness in ("claude", "codex"):
+                self.assertEqual(self.run_role("reviewer", "1", "--lane", lane, "--harness", harness).returncode, 0)
+        calls = self.calls()
+        self.assertEqual(len(calls), 4)
+        for claude, codex in (calls[0:2], calls[2:4]):
+            self.assertEqual(claude["argv"][claude["argv"].index("--tools") + 1], "Read,Grep,Glob,Bash")
+            self.assertEqual(codex["argv"][codex["argv"].index("--sandbox") + 1], "workspace-write")
+
+    def test_spec_and_regression_lanes_have_network_and_standards_does_not(self):
+        for lane in ("spec", "regression", "standards"):
+            self.assertEqual(self.run_role("reviewer", "1", "--lane", lane, "--harness", "codex").returncode, 0)
+        spec, regression, standards = self.calls()
+        network = "sandbox_workspace_write.network_access=true"
+        self.assertIn(network, spec["argv"])
+        self.assertIn(network, regression["argv"])
+        self.assertNotIn(network, standards["argv"])
+
+    def test_reviewer_that_edits_the_checkout_fails(self):
+        r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "codex", mode="edit")
+        self.assertEqual(r.returncode, 3)
+        self.assertFalse(self.meta(self.runs()[0])["checkout_clean"])
+        self.assertIn("README.md", git(self.root, "status", "--porcelain"), "the edit stays in the checkout for inspection")
+
+    def test_reviewer_that_edits_the_checkout_and_fails_exits_3(self):
+        r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "codex", mode="edit-fail")
+        self.assertEqual(r.returncode, 3, "the checkout check applies whatever the harness exited with")
+        meta = self.meta(self.runs()[0])
+        self.assertEqual((meta["exit"], meta["checkout_clean"]), (3, False))
+
+    def test_failing_harness_that_leaves_the_checkout_clean_keeps_its_exit(self):
+        r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "codex", mode="fail")
+        self.assertEqual(r.returncode, 7)
+        self.assertTrue(self.meta(self.runs()[0])["checkout_clean"])
+
+    def test_reviewer_that_moves_head_fails(self):
+        r = self.run_role("reviewer", "1", "--lane", "regression", "--harness", "codex", mode="commit")
+        self.assertEqual(r.returncode, 3)
+        self.assertFalse(self.meta(self.runs()[0])["checkout_clean"])
+
+    def test_parallel_lanes_of_one_pr_share_the_checkout(self):
+        # A PR with many files, so that a switch to its head is slow enough to race with the other lane's check.
+        git(self.root, "checkout", "-q", "-b", "wide", "main")
+        for i in range(2000):
+            with open(os.path.join(self.root, f"file{i}.txt"), "w") as fh:
+                fh.write("x\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "wide")
+        git(self.root, "push", "-q", self.remote, "HEAD:refs/pull/5/head")
+        wide = git(self.root, "rev-parse", "HEAD")
+        git(self.root, "checkout", "-q", "main")
+        prs = json.loads(self.env["STUB_PRS"])
+        prs["5"] = {"headRefOid": wide, "baseRefName": "main", "closingIssuesReferences": [{"number": 15}]}
+        self.env["STUB_PRS"] = json.dumps(prs)
+        results = {}
+
+        def go(lane):
+            results[lane] = self.run_role("reviewer", "5", "--lane", lane, "--harness", "codex", mode="rendezvous")
+        lanes = ("spec", "standards")
+        threads = [threading.Thread(target=go, args=(lane,)) for lane in lanes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # Each harness waited for the other, so both lanes ran at the same time in the checkout.
+        self.assertEqual([results[lane].returncode for lane in lanes], [0, 0], [results[lane].stderr[-300:] for lane in lanes])
+        self.assertEqual([self.meta(run)["sha"] for run in self.runs()], [wide] * 2)
+        self.assertEqual(git(self.root, "rev-parse", "HEAD"), wide)
+        self.assertEqual(self.worktrees(), 1)
+
+    def test_missing_harness_still_records_the_exit(self):
+        # A PATH with gh but no codex.
+        bin_dir = os.path.join(self.tmp, "bin-no-codex")
+        os.makedirs(bin_dir)
+        os.symlink(os.path.join(self.tmp, "bin", "gh"), os.path.join(bin_dir, "gh"))
+        r = subprocess.run([RUN_ROLE, "reviewer", "1", "--lane", "spec", "--harness", "codex"], cwd=self.root,
+                           env={**self.env, "PATH": bin_dir + os.pathsep + "/usr/bin:/bin"},
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertEqual(self.meta(self.runs()[0])["exit"], 127)
+
+    def test_captured_evidence_is_copied_to_the_run_dir(self):
+        stale = os.path.join(self.root, ".verify", "artifacts", "old.txt")
+        os.makedirs(os.path.dirname(stale))
+        with open(stale, "w") as fh:
+            fh.write("from an earlier run\n")
+        os.utime(stale, (0, 0))
+        r = self.run_role("reviewer", "1", "--lane", "spec", "--harness", "codex", mode="artifact")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run, = self.runs()
+        self.assertTrue(os.path.isfile(os.path.join(run, "verify", "artifacts", "proof.txt")))
+        self.assertFalse(os.path.exists(os.path.join(run, "verify", "artifacts", "old.txt")), "only what this run wrote")
+        self.assertTrue(self.meta(run)["checkout_clean"])
+
+    def test_timeout(self):
+        r = self.run_role("reviewer", "1", "--lane", "standards", "--timeout", "1", mode="hang")
+        self.assertEqual(r.returncode, 124)
+        self.assertEqual(self.meta(self.runs()[0])["exit"], 124)
+
+    def test_pr_without_an_issue_is_refused(self):
+        r = self.run_role("reviewer", "2", "--lane", "spec")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("links no issue", r.stderr)
+        self.assertEqual(self.runs(), [])
+
+    # Builder
+
+    def test_builder_branches_from_main_in_the_checkout_and_keeps_it(self):
+        git(self.root, "switch", "-q", "pr1")
+        r = self.run_role("builder", "7", "--harness", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call, = self.calls()
+        self.assertEqual(call["argv"][call["argv"].index("--tools") + 1], "Read,Grep,Glob,Bash,Edit,Write")
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.root))
+        self.assertEqual(self.branch(), "issue-7")
+        self.assertEqual(git(self.root, "rev-parse", "issue-7"), git(self.root, "rev-parse", "main"))
+        self.assertEqual(self.worktrees(), 1)
+        again = self.run_role("builder", "7")
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("already exists", again.stderr)
+        self.assertIn("already exists", self.run_role("builder", "7", "--dry-run").stderr)
+
+    def test_builder_starts_from_the_remote_main(self):
+        git(self.root, "push", "-q", self.remote, "pr1:main")
+        self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
+        self.assertEqual(git(self.root, "rev-parse", "main"), self.heads["1"], "local main moves up to the remote's")
+        self.assertEqual(git(self.root, "rev-parse", "issue-7"), self.heads["1"])
+
+    def test_builder_creates_a_missing_local_main_from_the_remote(self):
+        git(self.root, "switch", "-q", "pr1")
+        git(self.root, "branch", "-D", "main")
+        base = git(self.remote, "rev-parse", "main")
+        r = self.run_role("builder", "7", "--harness", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(git(self.root, "rev-parse", "main"), base, "local main is created at the remote's")
+        self.assertEqual(git(self.root, "rev-parse", "issue-7"), base)
+        self.assertEqual(self.branch(), "issue-7")
+
+    def test_builder_refuses_a_local_main_ahead_of_the_remote(self):
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "local only")
+        r = self.run_role("builder", "7", "--harness", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("move it by hand", r.stderr)
+        self.assertEqual(git(self.root, "branch", "--list", "issue-7"), "")
+        self.assertEqual(self.runs(), [])
+
+    def test_builder_refuses_a_checkout_with_uncommitted_changes(self):
+        self.write_scratch()
+        r = self.run_role("builder", "7", "--harness", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("uncommitted changes", r.stderr)
+        self.assertEqual(git(self.root, "branch", "--list", "issue-7"), "")
+        self.assertFalse(os.path.exists(self.log), "no harness started")
+
+    def push_pr_for_branch(self, branch, comments):
+        """Publish a branch and open PR 4 on it, with the given comments. Returns the head SHA."""
+        git(self.root, "push", "-q", self.remote, branch)
+        head = git(self.root, "rev-parse", branch)
+        prs = json.loads(self.env["STUB_PRS"])
+        prs["4"] = {"headRefName": branch, "headRefOid": head, "baseRefName": "main",
+                    "closingIssuesReferences": [{"number": 7}], "comments": comments}
+        self.env["STUB_PRS"] = json.dumps(prs)
+        return head
+
+    def test_fix_round_starts_on_the_pr_branch_with_its_latest_verdicts(self):
+        self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
+        head = self.push_pr_for_branch("issue-7", [
+            {"body": "# Verdict: FAIL\n\nLane: standards\n\nold standards finding"},
+            {"body": "looks good to me"},
+            {"body": "# Verdict: PASS\n\nLane: spec + live proof\n\nspec passes"},
+            {"body": "# Verdict: FAIL\n\nLane: standards\n\nnew standards finding"},
+        ])
+        plan = self.dry_run("builder", "7", "--pr", "4", "--harness", "claude")
+        self.assertEqual(plan["sha"], head)
+        self.assertEqual(len(self.runs()), 1, "a dry run creates nothing")
+        r = self.run_role("builder", "7", "--pr", "4", "--harness", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta = self.meta(self.runs()[1])
+        self.assertEqual((meta["pr"], meta["sha"]), (4, head))
+        self.assertEqual(self.branch(), "issue-7")
+        self.assertEqual(git(self.root, "rev-parse", "HEAD"), head)
+        prompt = self.calls()[1]["stdin"]
+        self.assertIn("fix round", prompt)
+        self.assertIn("new standards finding", prompt)
+        self.assertIn("spec passes", prompt)
+        self.assertNotIn("old standards finding", prompt, "only the latest verdict of each lane")
+        self.assertNotIn("looks good", prompt, "only verdicts")
+        self.assertEqual(self.worktrees(), 1)
+
+    def test_fix_round_refuses_a_local_branch_that_is_not_at_the_pr_head(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "spec", "--pr", "4").returncode, 2)
+        self.assertEqual(self.run_role("builder", "7", "--harness", "claude").returncode, 0)
+        self.push_pr_for_branch("issue-7", [])
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "not pushed")
+        r = self.run_role("builder", "7", "--pr", "4", "--harness", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not at the PR head", r.stderr)
+        self.assertEqual(len(self.runs()), 1)
+
+    # Other roles
+
+    def test_model_and_effort_are_always_passed(self):
+        self.assertEqual(self.run_role("planner", "--harness", "codex").returncode, 0)
+        self.assertEqual(self.run_role("planner", "--harness", "claude", "--model", "M", "--effort", "E").returncode, 0)
+        codex, claude = self.calls()
+        self.assertIn("model_reasoning_effort=xhigh", codex["argv"])
+        self.assertEqual(codex["argv"][codex["argv"].index("-m") + 1], "gpt-6.1-sol")
+        self.assertEqual(claude["argv"][claude["argv"].index("--model") + 1], "M")
+        self.assertEqual(claude["argv"][claude["argv"].index("--effort") + 1], "E")
+
+    def test_dry_run_changes_nothing(self):
+        git(self.root, "switch", "-q", "pr1")
+        r = self.run_role("builder", "8", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ROLE-FILE-builder", r.stdout)
+        self.dry_run("reviewer", "1", "--lane", "spec")
+        self.assertFalse(os.path.exists(self.log), "no harness started")
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".verify")))
+        self.assertEqual(self.branch(), "pr1", "the checkout is not switched")
+        self.assertEqual(git(self.root, "branch", "--list", "issue-8"), "")
+
+    # Models table
+
+    def test_roles_start_on_their_row_of_the_models_table(self):
+        harness_names = {"Claude Code": "claude", "Codex": "codex"}
+        for role, row, args in (("planner", "Planner", ()), ("builder", "Builder", ("8",)),
+                                ("reviewer", "Reviewer, every lane", ("1", "--lane", "standards")),
+                                ("coordinator", "Coordinator", ())):
+            harness, model, effort = models_table()[row]
+            plan = self.dry_run(role, *args)
+            self.assertEqual((plan["harness"], plan["model"], plan["effort"]),
+                             (harness_names[harness], model, effort), role)
+
+    def test_the_row_comes_from_the_table_the_run_starts_from(self):
+        path = os.path.join(self.root, "docs/agents/process.md")
+        with open(path) as fh:
+            text = fh.read()
+        text = re.sub(r"(\| Builder \| Claude Code \| `[^`]+` \| )\w+ \|", r"\1low |", text, count=1)
+        with open(path, "w") as fh:
+            fh.write(text)
+        git(self.root, "commit", "-qam", "builder effort low")
+        git(self.root, "push", "-q", self.remote, "main")
+        self.assertEqual(self.dry_run("builder", "8")["effort"], "low")
+
+    def test_flags_override_the_row(self):
+        plan = self.dry_run("builder", "8", "--model", "claude-opus-5-5", "--effort", "medium")
+        self.assertEqual((plan["harness"], plan["model"], plan["effort"]), ("claude", "claude-opus-5-5", "medium"))
+        self.assertEqual(plan["argv"][plan["argv"].index("--effort") + 1], "medium")
+        plan = self.dry_run("reviewer", "1", "--lane", "spec", "--harness", "claude")
+        self.assertEqual((plan["harness"], plan["model"], plan["effort"]), ("claude", "claude-opus-5-5", "high"))
+
+    def test_role_without_a_row_needs_model_and_effort(self):
+        path = os.path.join(self.root, "docs/agents/process.md")
+        with open(path) as fh:
+            text = fh.read()
+        text = re.sub(r"\n\| Coordinator \|[^\n]*", "", text, count=1)
+        with open(path, "w") as fh:
+            fh.write(text)
+        git(self.root, "commit", "-qam", "no coordinator row")
+        git(self.root, "push", "-q", self.remote, "main")
+        for args in (("coordinator",), ("coordinator", "3"), ("coordinator", "--model", "M")):
+            r = self.run_role(*args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("--model and --effort", r.stderr)
+        self.assertEqual(self.runs(), [])
+        self.assertFalse(os.path.exists(self.log), "no harness started")
+        plan = self.dry_run("coordinator", "--model", "M", "--effort", "E")
+        self.assertEqual((plan["model"], plan["effort"]), ("M", "E"))
+
+    def test_builder_timeout_is_an_hour_and_other_roles_get_twenty_minutes(self):
+        self.assertEqual(self.dry_run("builder", "8")["timeout"], 3600)
+        self.assertEqual(self.dry_run("planner")["timeout"], 1200)
+        self.assertEqual(self.dry_run("reviewer", "1", "--lane", "standards")["timeout"], 1200)
+        self.assertEqual(self.dry_run("builder", "8", "--timeout", "90")["timeout"], 90)
+
+    # Claude Code output
+
+    def test_claude_runs_with_stream_json_and_codex_does_not(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude").returncode, 0)
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "codex").returncode, 0)
+        claude, codex = self.calls()
+        self.assertEqual(claude["argv"][claude["argv"].index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", claude["argv"])
+        self.assertNotIn("--output-format", codex["argv"])
+
+    def test_claude_output_is_the_final_answer_and_the_stream_is_kept(self):
+        r = self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run, = self.runs()
+        with open(os.path.join(run, "output.md")) as fh:
+            self.assertEqual(fh.read(), "# Verdict: PASS")
+        with open(os.path.join(run, "stream.jsonl")) as fh:
+            lines = fh.read().splitlines()
+        self.assertIn("stub noise, not JSON", lines)
+        events = [json.loads(line) for line in lines if line != "stub noise, not JSON"]
+        self.assertEqual([e["type"] for e in events], ["system", "rate_limit_event", "assistant", "system", "assistant",
+                                                       "system", "rate_limit_event", "system", "assistant",
+                                                       "rate_limit_event", "result"])
+
+    def test_codex_output_is_the_raw_stdout(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "codex").returncode, 0)
+        run, = self.runs()
+        with open(os.path.join(run, "output.md")) as fh:
+            self.assertEqual(fh.read(), "# Verdict: PASS\n")
+        self.assertFalse(os.path.exists(os.path.join(run, "stream.jsonl")))
+
+    def test_claude_run_that_times_out_has_an_empty_answer(self):
+        r = self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude", "--timeout", "1", mode="hang")
+        self.assertEqual(r.returncode, 124)
+        run, = self.runs()
+        with open(os.path.join(run, "output.md")) as fh:
+            self.assertEqual(fh.read(), "")
+        self.assertIsNone(self.meta(run)["peak_context_tokens"])
+
+    def test_meta_records_the_largest_context_of_any_assistant_event(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude").returncode, 0)
+        run, = self.runs()
+        # The stub's assistant events hold 18010, 60105 and 40053 input-side tokens. The peak is the
+        # largest: not the first, the last or the sum. Output tokens are not context.
+        self.assertEqual(self.meta(run)["peak_context_tokens"], 60105)
+
+    def test_meta_records_the_five_hour_quota_and_the_thinking_tokens(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude").returncode, 0)
+        meta = self.meta(self.runs()[0])
+        # The first and last five-hour utilization, not the largest: 0.41 and 0.47, with 0.52 between them.
+        self.assertEqual((meta["quota_five_hour_start"], meta["quota_five_hour_end"]), (0.41, 0.47))
+        # The thinking_tokens events add up to 170. The task_started event is not thinking.
+        self.assertEqual(meta["thinking_tokens"], 170)
+
+    def test_quota_and_thinking_tokens_are_null_when_the_stream_has_none(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "codex").returncode, 0)
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "claude", "--timeout", "1",
+                                       mode="hang").returncode, 124)
+        codex, hung = (self.meta(run) for run in self.runs())
+        for meta in (codex, hung):
+            self.assertEqual((meta["quota_five_hour_start"], meta["quota_five_hour_end"], meta["thinking_tokens"]),
+                             (None, None, None))
+
+    def test_peak_context_is_null_for_codex(self):
+        self.assertEqual(self.run_role("reviewer", "1", "--lane", "standards", "--harness", "codex").returncode, 0)
+        run, = self.runs()
+        self.assertIsNone(self.meta(run)["peak_context_tokens"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
